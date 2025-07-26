@@ -3,8 +3,9 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
+from modules.renderer import render_binary_as_text
 from PIL import ImageTk, Image
-from modules import hypertext_parser, image_generator
+from modules import hypertext_parser, image_generator, document_store
 from modules.logger import Logger
 from tkinter import filedialog,messagebox
 from modules.directory_import import import_text_files_from_directory
@@ -73,6 +74,12 @@ class DemoKitGUI(tk.Tk):
         self.config(menu=menubar)
 
         self._refresh_sidebar()
+    def _handle_strings(self):
+        doc_id = self.current_doc_id
+        if doc_id is None:
+            return
+
+        self._render_document(doc_id)
 
     def _build_sidebar(self):
         frame = tk.Frame(self)
@@ -125,6 +132,7 @@ class DemoKitGUI(tk.Tk):
         acts = [("ASK",self._handle_ask),("BACK",self._go_back),
                 ("DELETE",self._on_delete_clicked),("IMAGE",self._handle_image),("FLASK",self.export_and_launch_server),
 ("DIR IMPORT",self._import_directory),
+("SAVE AS TEXT", self._save_binary_as_text),
         ]
         for i,(lbl,cmd) in enumerate(acts):
             ttk.Button(btns, text=lbl, command=cmd).grid(row=0, column=i, sticky="we", padx=(0,4))
@@ -136,7 +144,7 @@ class DemoKitGUI(tk.Tk):
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Import", command=self._import_doc)
         self.context_menu.add_command(label="Export", command=self._export_doc)
-
+        self.context_menu.add_command(label="Save Binary As Text", command=self._save_binary_as_text)
     def _show_context_menu(self, event):
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)
@@ -300,6 +308,37 @@ class DemoKitGUI(tk.Tk):
         threading.Thread(target=launch, daemon=True).start()
         messagebox.showinfo("Server Started", "Flask server launched at http://127.0.0.1:5050")
 
+    def _save_binary_as_text(self):
+        selected_item = self.sidebar.selection() 
+        if not selected_item:
+            return # nothing selected
+
+        doc_id_str = self.sidebar.item(selected_item, 'values')[0]
+        if not doc_id_str.isdigit():
+            print(f"Warning: selected text is not a valid integer" '{doc_id_str}')
+            return # invalid selection
+
+        doc_id = int(doc_id_str)
+        doc = self.doc_store.get_document(doc_id)
+        if not doc or len(doc) < 3:
+            return
+
+        body = doc[2]
+        # only extract strings if it's actually binary
+        if isinstance(body, bytes) or('\x00' in str(body)):
+            print("Binary detected, converting to text using render_binary_as_text.")
+            body = render_binary_as_text(body)
+            self.doc_store.update_document(doc_id, body)
+            self._render_document(self.doc_store.get_document(doc_id))
+        else:
+            print("Document is already text. Skipping overwrite.")
+ 
+        content = self.processor.get_strings_content(doc_id)
+        # Update the document with the new content
+        self.doc_store.update_document(doc_id, content)
+        doc = self.doc_store.get_document(doc_id)
+        self._render_document(doc)
+
     def _refresh_sidebar(self):
         self.sidebar.delete(*self.sidebar.get_children())
         for doc in self.doc_store.get_document_index():
@@ -325,7 +364,7 @@ class DemoKitGUI(tk.Tk):
         if not confirm:
             return
 
-        doc = self.doc_store.get_document(self.current_doc_id) # must come before doc is used
+        doc = self.doc_store.get_document(current_doc_id) # must come before doc is used
         self.doc_store.get_document(nid)
         self.doc_store.delete_document(nid)
         self._refresh_sidebar()
@@ -341,7 +380,16 @@ class DemoKitGUI(tk.Tk):
         messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
 
     def _render_document(self, doc):
-        self.text.delete("1.0",tk.END)
+        body = doc[2]
+        
+        if isinstance(body, bytes):
+            rendered = render_binary_as_text(body)
+        else:
+            rendered = body
+
+        self.text.delete(1.0, tk.END)
+        self.text.insert(tk.END, rendered)
+
         self.img_label.configure(image="")
         self._last_pil_img=None
         self._last_tk_img=None
