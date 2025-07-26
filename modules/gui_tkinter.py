@@ -325,6 +325,7 @@ class DemoKitGUI(tk.Tk):
         if not confirm:
             return
 
+        self.doc_store.get_document(nid)
         self.doc_store.delete_document(nid)
         self._refresh_sidebar()
         self.text.delete("1.0", tk.END)
