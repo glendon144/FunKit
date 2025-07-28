@@ -364,8 +364,7 @@ class DemoKitGUI(tk.Tk):
         if not confirm:
             return
 
-        doc = self.doc_store.get_document(current_doc_id) # must come before doc is used
-        self.doc_store.get_document(nid)
+        doc = self.doc_store.get_document(nid) # must come before doc is used self.doc_store.get_document(nid)
         self.doc_store.delete_document(nid)
         self._refresh_sidebar()
         self.text.delete("1.0", tk.END)

@@ -1,6 +1,8 @@
 import openai
+import os
 from modules.logger import Logger
 from modules.document_store import DocumentStore
+from modules.renderer import render_binary_as_text
 
 class CommandProcessor:
     def __init__(self, store: DocumentStore, ai_interface, logger=None):
@@ -60,6 +62,16 @@ class CommandProcessor:
 
         on_link_created(selected_text)
         on_success(new_doc_id)
+    def get_strings_content(self, doc_id):
+        doc = self.doc_store.get_document(doc_id)
+        if not doc:
+            return "[ERROR] Document not found."
+
+        file_path = doc[1]
+        if not file_path or not os.path.exists(file_path):
+            return "[ERROR] File not found."
+
+        return render_binary_as_text(file_path)
 
     def set_api_key(self, api_key: str):
         try:
