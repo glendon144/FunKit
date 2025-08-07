@@ -10,12 +10,15 @@ __pycache__/
 # Virtual-envs
 venv/
 myenv*/
+pikit-env/
 .env/
 
 # Local binaries / wheels
 *.whl
 *.pyd
-
+# build directories
+dist/
+build/
 # Databases & cache
 storage/*.db
 
