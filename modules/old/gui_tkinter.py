@@ -7,13 +7,13 @@ from modules.renderer import render_binary_as_text
 from PIL import ImageTk, Image
 from modules import hypertext_parser, image_generator, document_store
 from modules.logger import Logger
-from tkinter import filedialog, messagebox
+from tkinter import filedialog,messagebox
 from modules.directory_import import import_text_files_from_directory
 from modules.TreeView import open_tree_view
+from modules.example_repo import SQLiteRepo
 import subprocess
 import sys
 import json
-import re  # for parsing (doc:ID) links
 
 class DemoKitGUI(tk.Tk):
     """DemoKit GUI – ASK / IMAGE / BACK buttons, context menu, image overlay, and history."""
@@ -64,9 +64,7 @@ class DemoKitGUI(tk.Tk):
         self._build_main_pane()
         self._build_context_menu()
 
-        # --- Menubar ---
         menubar = tk.Menu(self)
-        # File menu
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Import", command=self._import_doc)
         filemenu.add_command(label="Export Current", command=self._export_doc)
@@ -75,20 +73,14 @@ class DemoKitGUI(tk.Tk):
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
-        # View menu (adds TreeView entry + shortcut)
-        viewmenu = tk.Menu(menubar, tearoff=0)
-        viewmenu.add_command(label="Document Tree\tCtrl+T", command=self.on_tree_button)
-        menubar.add_cascade(label="View", menu=viewmenu)
         self.config(menu=menubar)
-        # Keyboard shortcut
-        self.bind("<Control-t>", lambda e: self.on_tree_button())
 
         self._refresh_sidebar()
-
     def _handle_strings(self):
         doc_id = self.current_doc_id
         if doc_id is None:
             return
+
         self._render_document(doc_id)
 
     def _build_sidebar(self):
@@ -102,6 +94,7 @@ class DemoKitGUI(tk.Tk):
         ttk.Scrollbar(frame, orient="vertical", command=self.sidebar.yview).pack(side=tk.RIGHT, fill=tk.Y)
         self.sidebar.bind("<<TreeviewSelect>>", self._on_select)
         self.sidebar.bind("<Delete>", lambda e: self._on_delete_clicked())
+        #self.sidebar_menu.add_command(label="Import Folder...", command=self._import_directory)
 
     def _on_select(self, event):
         sel = self.sidebar.selection()
@@ -118,32 +111,6 @@ class DemoKitGUI(tk.Tk):
         doc = self.doc_store.get_document(nid)
         if doc:
             self._render_document(doc)
-
-    # keep delete handler above main pane to avoid edge cases
-    def _on_delete_clicked(self):
-        """Delete the currently selected document."""
-        sel = self.sidebar.selection()
-        if not sel:
-            messagebox.showwarning("Delete", "No document selected.")
-            return
-        item = self.sidebar.item(sel[0])
-        try:
-            nid = int(item["values"][0])
-        except (ValueError, TypeError):
-            messagebox.showerror("Delete", "Invalid document ID.")
-            return
-        if not messagebox.askyesno("Confirm Delete", f"Delete document ID {nid}?"):
-            return
-        doc = self.doc_store.get_document(nid)
-        self.doc_store.delete_document(nid)
-        self._refresh_sidebar()
-        self.text.delete("1.0", tk.END)
-        self.img_label.configure(image="")
-        self.current_doc_id = None
-        self._last_pil_img = None
-        self._last_tk_img = None
-        self._image_enlarged = False
-        messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
 
     def _build_main_pane(self):
         pane = tk.Frame(self)
@@ -164,15 +131,10 @@ class DemoKitGUI(tk.Tk):
 
         btns = tk.Frame(pane)
         btns.grid(row=2, column=0, sticky="we", pady=(6,0))
-        acts = [
-            ("TREE", self.on_tree_button),
-            ("ASK", self._handle_ask),
-            ("BACK", self._go_back),
-            ("DELETE", lambda: self._on_delete_clicked()),
-            ("IMAGE", self._handle_image),
-            ("FLASK", self.export_and_launch_server),
-            ("DIR IMPORT", self._import_directory),
-            ("SAVE AS TEXT", self._save_binary_as_text),
+        acts = [("ASK",self._handle_ask),("BACK",self._go_back),
+                ("DELETE",self._on_delete_clicked),("IMAGE",self._handle_image),("FLASK",self.export_and_launch_server),
+("DIR IMPORT",self._import_directory),
+("SAVE AS TEXT", self._save_binary_as_text),
         ]
         for i,(lbl,cmd) in enumerate(acts):
             ttk.Button(btns, text=lbl, command=cmd).grid(row=0, column=i, sticky="we", padx=(0,4))
@@ -185,7 +147,6 @@ class DemoKitGUI(tk.Tk):
         self.context_menu.add_command(label="Import", command=self._import_doc)
         self.context_menu.add_command(label="Export", command=self._export_doc)
         self.context_menu.add_command(label="Save Binary As Text", command=self._save_binary_as_text)
-
     def _show_context_menu(self, event):
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)
@@ -230,78 +191,11 @@ class DemoKitGUI(tk.Tk):
             self._render_document(doc)
         else:
             messagebox.showerror("BACK",f"Document {prev} not found.")
+# inside your Tk GUI (e.g., gui_tkinter.py)
 
-    # ---- TreeView wiring ----
     def on_tree_button(self):
-        """Open the TreeView window using the current document as the root (if any)."""
-
-        class _DocStoreRepo:
-            """Adapter that derives parent→children from green links like (doc:123)."""
-            def __init__(self, ds):
-                self.ds = ds
-                self._roots_cache = None
-
-            def _mk_node(self, d):
-                if not d:
-                    return None
-                if isinstance(d, dict):
-                    return type("DocNodeShim", (), {
-                        "id": d.get("id"),
-                        "title": d.get("title") or "(untitled)",
-                        "parent_id": d.get("parent_id"),
-                    })()
-                # tuple/list fallback: (id, title, body, ...)
-                did = d[0] if len(d) > 0 else None
-                title = d[1] if len(d) > 1 else ""
-                return type("DocNodeShim", (), {"id": did, "title": title or "(untitled)", "parent_id": None})()
-
-            def get_doc(self, doc_id: int):
-                return self._mk_node(self.ds.get_document(doc_id))
-
-            def _body(self, doc):
-                return doc["body"] if isinstance(doc, dict) else (doc[2] if len(doc) > 2 else "")
-
-            def _children_from_links(self, parent_id):
-                d = self.ds.get_document(parent_id)
-                if not d:
-                    return []
-                body = self._body(d)
-                if isinstance(body, (bytes, bytearray)):
-                    return []
-                ids = [int(m) for m in re.findall(r"\(doc:(\d+)\)", body)]
-                out = []
-                for cid in ids:
-                    nd = self.ds.get_document(cid)
-                    if nd:
-                        out.append(self._mk_node(nd))
-                out.sort(key=lambda n: n.id)
-                return out
-
-            def get_children(self, parent_id):
-                # No parent_id column in the DB, so derive from green-link references
-                if parent_id is None:
-                    if self._roots_cache is None:
-                        all_ids = [row["id"] for row in self.ds.get_document_index()]
-                        referenced = set()
-                        for row in self.ds.get_document_index():
-                            d = self.ds.get_document(row["id"])
-                            body = self._body(d)
-                            if isinstance(body, (bytes, bytearray)):
-                                continue
-                            referenced.update(int(m) for m in re.findall(r"\(doc:(\d+)\)", body))
-                        # roots = docs never referenced by any other doc
-                        roots = [self._mk_node(self.ds.get_document(i)) for i in all_ids if i not in referenced]
-                        if not roots:  # fallback: show all if everything is referenced
-                            roots = [self._mk_node(self.ds.get_document(i)) for i in all_ids]
-                        self._roots_cache = [n for n in roots if n]
-                        self._roots_cache.sort(key=lambda n: n.id)
-                    return list(self._roots_cache)
-                else:
-                    return self._children_from_links(parent_id)
-
-        repo = _DocStoreRepo(self.doc_store)
-        root_id = self.current_doc_id
-        open_tree_view(self, repo=repo, on_open_doc=self._on_link_click, root_doc_id=root_id)
+        repo = SQLiteRepo(self.db_path)  # or your existing repo
+        open_tree_view(self.root, repo=repo, on_open_doc=self.open_doc_by_id, root_doc_id=self.current_doc_id)
 
     def _handle_image(self):
         try:
@@ -392,11 +286,11 @@ class DemoKitGUI(tk.Tk):
             return
         Path(path).write_text(doc["body"],encoding="utf-8")
         messagebox.showinfo("Export",f"Saved to:\n{path}")
-
     def _import_directory(self):
         dir_path = filedialog.askdirectory(title="Select Folder to Import")
         if not dir_path:
             return
+
         imported, skipped = import_text_files_from_directory(dir_path, self.doc_store)
         msg = f"Imported {imported} file(s), skipped {skipped}."
         print("[INFO]", msg)
@@ -406,12 +300,14 @@ class DemoKitGUI(tk.Tk):
     def export_and_launch_server(self):
         export_path = Path("exported_docs")
         export_path.mkdir(exist_ok=True)
+
         for doc in self.doc_store.get_document_index():
             data = dict(self.doc_store.get_document(doc["id"]))
             if data:
                 data = sanitize_doc(data)
                 with open(export_path / f"{data['id']}.json", "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
+
         def launch():
             fp = Path("modules") / "flask_server.py"
             if fp.exists():
@@ -422,25 +318,30 @@ class DemoKitGUI(tk.Tk):
     def _save_binary_as_text(self):
         selected_item = self.sidebar.selection() 
         if not selected_item:
-            return  # nothing selected
+            return # nothing selected
+
         doc_id_str = self.sidebar.item(selected_item, 'values')[0]
         if not doc_id_str.isdigit():
-            print(f"Warning: selected text is not a valid integer '{doc_id_str}'")
-            return
+            print(f"Warning: selected text is not a valid integer" '{doc_id_str}')
+            return # invalid selection
+
         doc_id = int(doc_id_str)
         doc = self.doc_store.get_document(doc_id)
         if not doc or len(doc) < 3:
             return
+
         body = doc[2]
-        # convert only if binary
-        if isinstance(body, bytes) or ('\x00' in str(body)):
+        # only extract strings if it's actually binary
+        if isinstance(body, bytes) or('\x00' in str(body)):
             print("Binary detected, converting to text using render_binary_as_text.")
             body = render_binary_as_text(body)
             self.doc_store.update_document(doc_id, body)
             self._render_document(self.doc_store.get_document(doc_id))
         else:
             print("Document is already text. Skipping overwrite.")
+ 
         content = self.processor.get_strings_content(doc_id)
+        # Update the document with the new content
         self.doc_store.update_document(doc_id, content)
         doc = self.doc_store.get_document(doc_id)
         self._render_document(doc)
@@ -448,32 +349,80 @@ class DemoKitGUI(tk.Tk):
     def _refresh_sidebar(self):
         self.sidebar.delete(*self.sidebar.get_children())
         for doc in self.doc_store.get_document_index():
-            self.sidebar.insert("","end", values=(doc["id"],doc["title"],doc["description"]))
+            self.sidebar.insert("","end",
+                                values=(doc["id"],doc["title"],doc["description"]))
+
+
+    def _on_delete_clicked(self):
+        """Delete the currently selected document."""
+        sel = self.sidebar.selection()
+        if not sel:
+            messagebox.showwarning("Delete", "No document selected.")
+            return
+
+        item = self.sidebar.item(sel[0])
+        try:
+            nid = int(item["values"][0])
+        except (ValueError, TypeError):
+            messagebox.showerror("Delete", "Invalid document ID.")
+            return
+
+        confirm = messagebox.askyesno("Confirm Delete", f"Delete document ID {nid}?")
+        if not confirm:
+            return
+
+        doc = self.doc_store.get_document(nid) # must come before doc is used self.doc_store.get_document(nid)
+        self.doc_store.delete_document(nid)
+        self._refresh_sidebar()
+        self.text.delete("1.0", tk.END)
+        body = doc["body"]
+
+
+        self.img_label.configure(image="")
+        self.current_doc_id = None
+        self._last_pil_img = None
+        self._last_tk_img = None
+        self._image_enlarged = False
+        messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
 
     def _render_document(self, doc):
-        """Render a document once (no duplicate inserts), parse green links."""
-        # Normalize doc body
-        body = doc.get("body") if isinstance(doc, dict) else (doc[2] if len(doc) > 2 else "")
-        self.text.delete("1.0", tk.END)
+        body = doc[2]
+        
+        if isinstance(body, bytes):
+            rendered = render_binary_as_text(body)
+        else:
+            rendered = body
+
+        self.text.delete(1.0, tk.END)
+        self.text.insert(tk.END, rendered)
+
+        self.img_label.configure(image="")
+        self._last_pil_img=None
+        self._last_tk_img=None
+        self._image_enlarged=False
+        body=doc.get("body") if isinstance(doc,dict) else doc[2]
+
         # Guard 1: bytes
-        if isinstance(body, (bytes, bytearray)):
+        if isinstance(body, bytes):
             self.text.insert(tk.END, "[binary document]")
             return
-        # Guard 2: oversized
-        if isinstance(body, str) and len(body) > 200_000:
+
+        # Guard 2 : gigantic strings (e.g., .tar decoded as latin-1)
+        if len(body) > 200_000:     # threshold
             self.text.insert(tk.END, "[large binary-like document]")
             return
-        # Show and parse
-        self.text.insert(tk.END, body or "")
-        hypertext_parser.parse_links(self.text, body or "", self._on_link_click)
 
-    def _on_link_click(self, doc_id):
+        self.text.insert(tk.END,body)
+        hypertext_parser.parse_links(self.text,body,self._on_link_click)
+
+    def _on_link_click(self,doc_id):
         if self.current_doc_id is not None:
             self.history.append(self.current_doc_id)
-        self.current_doc_id = doc_id
-        doc = self.doc_store.get_document(doc_id)
+        self.current_doc_id=doc_id
+        doc=self.doc_store.get_document(doc_id)
         if doc:
             self._render_document(doc)
+
 
 def sanitize_doc(doc):
     if isinstance(doc["body"], bytes):
@@ -482,4 +431,3 @@ def sanitize_doc(doc):
         except UnicodeDecodeError:
             doc["body"] = doc["body"].decode("utf-8", errors="replace")
     return doc
-
