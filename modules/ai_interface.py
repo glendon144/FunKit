@@ -22,9 +22,9 @@ class AIInterface:
             raise RuntimeError("OpenAI API key not set")
         try:
             resp = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
+                model="gpt-5",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=1,
             )
             reply = resp["choices"][0]["message"]["content"].strip()
             self.logger.info(f"AI reply received ({len(reply)} chars)")
