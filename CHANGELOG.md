@@ -1,3 +1,12 @@
+## v1.2.2 — 2025-08-14
+
+- 🌐 **URL → OPML**: multi-URL input (spaces, commas, semicolons, newlines), auto `https://`, bracket stripping; ASCII User-Agent (fixes header encoding error). 
+- 🧵 **Thread-safe DB writes**: all SQLite writes are marshalled to the Tk main thread (no more cross-thread sqlite errors).
+- 🧰 **OPML menu + hotkeys**: URL → OPML (Ctrl+U), Convert Selection → OPML (Ctrl+Shift+O / Ctrl+Alt+O / F6), Batch: Convert Selected → OPML (Shift+F6).
+- 🧱 **Toolbar integration**: exposing `self.toolbar` lets plugins add URL → OPML / Convert → OPML / Batch → OPML buttons.
+- 🧹 Polish: safer exporters, better OPML rendering, fewer surprises on binary docs.
+
+
 ## v1.2.1 — 2025-08-14
 
 ✨ **PiKit / DemoKit — v1.2.1**
@@ -43,4 +52,3 @@ Thanks for the great collaboration! 🚀
 - OPML tree depth preference persists until changed by user.
 
 Tagging this as the first stable OPML-capable build of PiKit.
-
