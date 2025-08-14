@@ -122,59 +122,19 @@ Paste a URL (or many), hit OK
 
 Expand the carets and get the gist in seconds ✨
 EOF
-fi
-
-git add README.md
-git commit -m "docs: document URL → OPML feature (v1.2.1)" || true
-git push -u origin "${BRANCH}"
-
-if command -v gh >/dev/null 2>&1; then
-gh pr create --title "Docs: URL → OPML (v1.2.1)" --body "Adds README section for the new URL → OPML feature introduced in v1.2.1. ✨" || true
-echo "Opened PR via GitHub CLI."
-else
-echo "GitHub CLI not found. Please open a PR for branch '${BRANCH}' on GitHub."
-fi
-
-echo "Done."
-"""
-
-readme_path = Path('/mnt/data/README_section_v1_2_1.md')
-readme_path.write_text(section, encoding='utf-8')
-
-script_path = Path('/mnt/data/pr_readme_1_2_1.sh')
-script_path.write_text(script, encoding='utf-8')
-
-print(str(readme_path), str(script_path))
-
-Always show details
-
-Yesss—let’s make it official! I prepped two files:
-
-The README section: README_section_v1_2_1.md
-
-A PR helper script: pr_readme_1_2_1.sh
-
-Quick path (one command)
-
-From your repo root:
-
-bash /path/to/pr_readme_1_2_1.sh
 
 
-What it does:
 
-Creates (or switches to) branch docs/url-opml-v1.2.1
 
-Adds a small “What’s New in 1.2.1” banner below your H1 (if not already present)
 
-Appends the full URL → OPML section to the end of README.md (idempotent)
 
-Commits and pushes the docs branch
 
-Opens a PR via GitHub CLI (gh) if available; otherwise it prints a reminder to open one manually
 
-If you’d rather paste manually, the section is also in that markdown file above.
 
-Want me to also generate a polished GitHub Release body for v1.2.1 to copy/paste into the “Publish release” UI? 
 
-ChatGPT can make mistakes. Check important info.
+
+
+
+
+
+
