@@ -17,6 +17,24 @@ from modules.logger import Logger
 from modules.directory_import import import_text_files_from_directory
 from modules.TreeView import open_tree_view
 
+
+# --- OPML Engine (case-safe import) ---
+try:
+    from modules.Aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+except Exception:
+    try:
+        from modules.aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+    except Exception:
+        try:
+            from Aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+        except Exception:
+            try:
+                from aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+            except Exception:
+                build_opml_from_text = build_opml_from_html = EngineConfig = None  # type: ignore
+
+import re as _re_phase1
+_HTML_SIGNS = _re_phase1.compile(r"<\s*(!doctype|html|head|body|h[1-6]|p|div|ul|ol|li)\b", _re_phase1.I)
 SETTINGS_FILE = Path("pikit_settings.json")
 
 
@@ -42,7 +60,7 @@ class DemoKitGUI(tk.Tk):
         self.settings = self._load_settings()
         self.opml_expand_depth: int = int(self.settings.get("opml_expand_depth", 2))
 
-        self.title("Engelbart Journal – DemoKit")
+        self.title("Engelbart Journal – DemoKit — Phase 1 OPML — Phase 2 OPML (SAFE Batch) — Phase 2.2 (SAFE Batch + HTML Ingest) — Phase 2.3 (Prefs) — Phase 2.3.1 (Prefs + newline fix) — Phase 2.3.2 (Batch OPML validate/repair)")
         self.geometry("1200x800")
         self.columnconfigure(0, minsize=self.SIDEBAR_WIDTH, weight=0)
         self.columnconfigure(1, weight=1)
@@ -57,6 +75,7 @@ class DemoKitGUI(tk.Tk):
         # File menu
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Import", command=self._import_doc)
+        filemenu.add_command(label="Import HTML → OPML", command=self._import_html_as_opml)
         filemenu.add_command(label="Export Current", command=self._export_doc)
         filemenu.add_separator()
         filemenu.add_command(label="Export to Intraweb", command=self.export_and_launch_server)
@@ -167,8 +186,6 @@ class DemoKitGUI(tk.Tk):
 
         btns = tk.Frame(pane)
         btns.grid(row=2, column=0, sticky="we", pady=(6, 0))
-        self.toolbar = btns   # <- expose the toolbar so plugins can attach buttons
-
         acts = [
             ("TREE", self.on_tree_button),
             ("OPEN OPML", self._open_opml_from_main),
@@ -179,7 +196,10 @@ class DemoKitGUI(tk.Tk):
             ("FLASK", self.export_and_launch_server),
             ("DIR IMPORT", self._import_directory),
             ("SAVE AS TEXT", self._save_binary_as_text),
-        ]
+                    ("Convert to OPML", self._convert_current_to_opml),
+            ("Batch: Create OPML copies", self._batch_create_opml_copies),
+            ("Batch: Repair OPML (selected)", self._batch_repair_selected_opml),
+]
         for i, (lbl, cmd) in enumerate(acts):
             ttk.Button(btns, text=lbl, command=cmd).grid(row=0, column=i, sticky="we", padx=(0, 4))
 
@@ -558,12 +578,242 @@ class DemoKitGUI(tk.Tk):
                 self._image_enlarged = False
                 self.after(0, lambda: self.img_label.configure(image=self._last_tk_img))
             except Exception as e:
-                err = str(e)  # capture inside the except scope
-                self.after(0, lambda err=err: messagebox.showerror("Image Error", err))
+                self.after(0, lambda: messagebox.showerror("Image Error", str(e)))
 
         threading.Thread(target=wrk, daemon=True).start()
 
     # ---------------- Import/Export ----------------
+
+    # ---------------- Convert to OPML (Phase 1, safe) ----------------
+    def _convert_current_to_opml(self):
+        """Create a new OPML document from the selection (or entire doc) without altering the original."""
+        try:
+            if EngineConfig is None:
+                messagebox.showerror("OPML", "Aopmlengine.py not found or failed to import.")
+                return
+        except NameError:
+            messagebox.showerror("OPML", "Aopmlengine import not available.")
+            return
+
+        if getattr(self, "current_doc_id", None) is None:
+            messagebox.showwarning("OPML", "No document selected.")
+            return
+
+        # Gather source text
+        full_text = self.text.get("1.0", "end-1c")
+        try:
+            sel_start = self.text.index(tk.SEL_FIRST)
+            sel_end = self.text.index(tk.SEL_LAST)
+            src_txt = self.text.get(sel_start, sel_end)
+        except tk.TclError:
+            src_txt = full_text
+
+        if not (src_txt or "").strip():
+            messagebox.showwarning("OPML", "Nothing to convert.")
+            return
+
+        try:
+            cur = self.doc_store.get_document(self.current_doc_id)
+            cur_title = (cur["title"] if isinstance(cur, dict) else (cur[1] if cur else None)) or "Document"
+            opml_title = f"{cur_title} (OPML)"
+            cfg = EngineConfig(enable_ai=False, title=opml_title, owner_name=None)
+            opml_doc = build_opml_from_html(src_txt, cfg) if _HTML_SIGNS.search(src_txt) else build_opml_from_text(src_txt, cfg)
+            new_id = self.doc_store.add_document(opml_title, opml_doc.to_xml())
+            self._refresh_sidebar()
+            # Auto-open the OPML doc
+            self._on_link_click(new_id)
+            messagebox.showinfo("OPML", f"Created OPML document #{new_id}.")
+        except Exception as e:
+            messagebox.showerror("OPML", f"Convert failed: {e}")
+
+    # ---------------- Batch: Create OPML copies (SAFE, no edits to originals) ----------------
+    def _get_selected_ids_from_sidebar(self) -> list[int]:
+        ids: list[int] = []
+        for iid in self.sidebar.selection():
+            vals = self.sidebar.item(iid, "values") or []
+            if not vals:
+                continue
+            try:
+                ids.append(int(vals[0]))
+            except Exception:
+                pass
+        return ids
+
+    def _batch_create_opml_copies(self):
+        """Create OPML siblings for all selected docs. Originals are left untouched."""
+        try:
+            if EngineConfig is None:
+                messagebox.showerror("Batch OPML", "Aopmlengine.py not found or failed to import.")
+                return
+        except NameError:
+            messagebox.showerror("Batch OPML", "Aopmlengine import not available.")
+            return
+
+        ids = self._get_selected_ids_from_sidebar()
+        if not ids:
+            messagebox.showwarning("Batch OPML", "No documents selected.")
+            return
+
+        created = []
+        failed = []
+
+        # Busy cursor
+        try:
+            self.config(cursor="watch"); self.update_idletasks()
+        except Exception:
+            pass
+
+        for did in ids:
+            try:
+                row = self.doc_store.get_document(did)
+                if not row:
+                    raise RuntimeError("Not found")
+                # title/body from dict or tuple
+                title = row["title"] if isinstance(row, dict) else (row[1] if len(row) > 1 else "Document")
+                body = row["body"] if isinstance(row, dict) else (row[2] if len(row) > 2 else "")
+                if isinstance(body, (bytes, bytearray)):
+                    raise RuntimeError("Binary document not supported")
+
+                opml_title = f"{title or 'Document'} (OPML)"
+                # Build xml and validate; if parsing fails, rebuild via text path
+                try:
+                    xml_text = self._make_opml_from_text_or_html(body or "", opml_title)
+                except Exception as _e:
+                    raise
+                if not self._validate_opml_xml(xml_text):
+                    # Last resort: strip any control chars and rebuild
+                    try:
+                        clean = (body or "").replace("\r", "").lstrip("\ufeff\n\t ")
+                        xml_text = self._make_opml_from_text_or_html(clean, opml_title)
+                    except Exception as _e2:
+                        raise
+                new_id = self.doc_store.add_document(opml_title, xml_text)
+                created.append((did, new_id, opml_title))
+            except Exception as e:
+                failed.append((did, str(e)))
+
+        try:
+            self.config(cursor="")
+        except Exception:
+            pass
+
+        self._refresh_sidebar()
+
+        # Report
+        if created:
+            first_new_id = created[0][1]
+            # Optionally open the first created OPML doc
+            try:
+                self._on_link_click(first_new_id)
+            except Exception:
+                pass
+
+        if failed:
+            msg = "; ".join(f"#{d}: {err}" for d, err in failed[:5])
+            extra = " (showing first 5)" if len(failed) > 5 else ""
+            messagebox.showwarning("Batch OPML", f"Created {len(created)} OPML doc(s), {len(failed)} failed{extra}: {msg}")
+        else:
+            messagebox.showinfo("Batch OPML", f"Created {len(created)} OPML doc(s). Originals were not modified.")
+
+    def _import_html_as_opml(self):
+        """Pick an .html/.htm file and import it directly as OPML (new doc)."""
+        from pathlib import Path
+        if EngineConfig is None:
+            messagebox.showerror("Import HTML → OPML", "Aopmlengine.py not found or failed to import.")
+            return
+        path = filedialog.askopenfilename(
+            title="Import HTML → OPML",
+            filetypes=[("HTML", "*.html *.htm"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        p = Path(path)
+        try:
+            html = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            messagebox.showerror("Import HTML → OPML", f"Failed to read file: {e}")
+            return
+        try:
+            title = p.stem
+            cfg = EngineConfig(enable_ai=False, title=f"{title} (OPML)", owner_name=None)
+            opml_doc = build_opml_from_html(html, cfg)
+            new_id = self.doc_store.add_document(f"{title} (OPML)", opml_doc.to_xml())
+        except Exception as e:
+            messagebox.showerror("Import HTML → OPML", f"Failed to convert: {e}")
+            return
+        self._refresh_sidebar()
+        self.current_doc_id = new_id
+        doc = self.doc_store.get_document(new_id)
+        if doc:
+            self._render_document(doc)
+        messagebox.showinfo("Import HTML → OPML", f"Imported as OPML document #{new_id}.")
+
+
+    def _batch_repair_selected_opml(self):
+        """Validate and repair selected OPML docs in-place; leaves non-OPML docs untouched.
+        If a doc fails XML parse but looks OPML-ish or has '(OPML)' title, rebuilds via engine.
+        """
+        try:
+            if EngineConfig is None:
+                messagebox.showerror("Batch Repair", "Aopmlengine.py not found or failed to import.")
+                return
+        except NameError:
+            messagebox.showerror("Batch Repair", "Aopmlengine import not available.")
+            return
+
+        ids = self._get_selected_ids_from_sidebar() if hasattr(self, "_get_selected_ids_from_sidebar") else []
+        if not ids:
+            messagebox.showwarning("Batch Repair", "No documents selected.")
+            return
+
+        repaired, skipped, failed = 0, 0, 0
+
+        try:
+            self.config(cursor="watch"); self.update_idletasks()
+        except Exception:
+            pass
+
+        for did in ids:
+            try:
+                row = self.doc_store.get_document(did)
+                if not row:
+                    failed += 1; continue
+                title = row["title"] if isinstance(row, dict) else (row[1] if len(row) > 1 else "Document")
+                body = row["body"] if isinstance(row, dict) else (row[2] if len(row) > 2 else "")
+                if not isinstance(body, str):
+                    skipped += 1; continue
+
+                text_lc = (body or "").lstrip("\\ufeff\\r\\n\\t ").lower()
+                looks_xml = text_lc.startswith("<?xml") or "<opml" in text_lc
+                if looks_xml and self._validate_opml_xml(body):
+                    skipped += 1
+                    continue
+
+                # Try rebuild via engine
+                try:
+                    xml_text = self._make_opml_from_text_or_html(body or "", title)
+                except Exception as _e:
+                    failed += 1; continue
+                if not self._validate_opml_xml(xml_text):
+                    failed += 1; continue
+
+                self.doc_store.update_document(did, xml_text)
+                repaired += 1
+            except Exception:
+                failed += 1
+
+        try:
+            self.config(cursor="")
+        except Exception:
+            pass
+
+        self._refresh_sidebar()
+        message = f"Repaired: {repaired}, Skipped: {skipped}, Failed: {failed}."
+        if repaired and getattr(self, "current_doc_id", None) in ids:
+            doc = self.doc_store.get_document(self.current_doc_id)
+            if doc:
+                self._render_document(doc)
+        messagebox.showinfo("Batch Repair", message)
 
     def _import_doc(self):
         path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
@@ -579,92 +829,21 @@ class DemoKitGUI(tk.Tk):
             self._render_document(doc)
 
     def _export_doc(self):
-        """Robust export: picks sensible default extension, writes bytes for binary and text for text."""
-        from tkinter import filedialog, messagebox
-        from pathlib import Path
-
-        if getattr(self, "current_doc_id", None) is None:
-            messagebox.showwarning("Export", "No document selected.")
+        if self.current_doc_id is None:
+            messagebox.showwarning("Export", "No document loaded.")
             return
-
-        # Fetch and normalize
         doc = self.doc_store.get_document(self.current_doc_id)
-        if hasattr(doc, "keys"):  # sqlite3.Row-like
-            title = doc["title"] if "title" in doc.keys() else "Document"
-            body = doc["body"] if "body" in doc.keys() else ""
-        elif isinstance(doc, dict):
-            title = doc.get("title") or "Document"
-            body = doc.get("body") or ""
-        else:  # tuple/list row: (id, title, body, ...)
-            title = doc[1] if len(doc) > 1 else "Document"
-            body = doc[2] if len(doc) > 2 else ""
-
-        # Infer extension/filetypes
-        ext = ".txt"
-        filetypes = [("Text", "*.txt"), ("All files", "*.*")]
-        if isinstance(body, (bytes, bytearray)):
-            b = bytes(body)
-            if b.startswith(b"\x89PNG\r\n\x1a\n"):
-                ext, filetypes = ".png", [("PNG image", "*.png"), ("All files", "*.*")]
-            elif b.startswith(b"\xff\xd8\xff"):
-                ext, filetypes = ".jpg", [("JPEG image", "*.jpg;*.jpeg"), ("All files", "*.*")]
-            elif b[:6] in (b"GIF87a", b"GIF89a"):
-                ext, filetypes = ".gif", [("GIF image", "*.gif"), ("All files", "*.*")]
-            elif b.startswith(b"%PDF-"):
-                ext, filetypes = ".pdf", [("PDF", "*.pdf"), ("All files", "*.*")]
-            elif b[:4] == b"RIFF" and b[8:12] == b"WEBP":
-                ext, filetypes = ".webp", [("WebP", "*.webp"), ("All files", "*.*")]
-            else:
-                try:
-                    b.decode("utf-8")
-                    ext, filetypes = ".txt", [("Text", "*.txt"), ("All files", "*.*")]
-                except Exception:
-                    ext, filetypes = ".bin", [("Binary", "*.bin"), ("All files", "*.*")]
-        else:
-            s = (body or "").lstrip()
-            low = s.lower()
-            if low.startswith("<opml"):
-                ext, filetypes = ".opml", [("OPML", "*.opml"), ("XML", "*.xml"), ("All files", "*.*")]
-            elif low.startswith("<html") or ("<body" in low) or ("<div" in low):
-                ext, filetypes = ".html", [("HTML", "*.html;*.htm"), ("All files", "*.*")]
-            elif low.startswith("<svg"):
-                ext, filetypes = ".svg", [("SVG", "*.svg"), ("All files", "*.*")]
-            else:
-                ext, filetypes = ".txt", [("Text", "*.txt"), ("All files", "*.*")]
-
-        # Ask destination
-        safe = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in (title or "Document")).strip() or "Document"
+        if not doc:
+            messagebox.showerror("Export", "Not found.")
+            return
+        default = f"document_{self.current_doc_id}.txt"
         path = filedialog.asksaveasfilename(
-            title="Export Document",
-            defaultextension=ext,
-            initialfile=f"{safe}{ext}",
-            filetypes=filetypes,
+            title="Export", initialfile=default, defaultextension=".txt", filetypes=[("Text", "*.txt"), ("All", "*.*")]
         )
         if not path:
             return
-
-        # Write
-        try:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(body, (bytes, bytearray)) and ext not in (".txt", ".opml", ".html", ".svg", ".xml"):
-                Path(path).write_bytes(bytes(body))
-            else:
-                if isinstance(body, (bytes, bytearray)):
-                    # Convert bytes→text if the user chose a texty extension
-                    try:
-                        text_out = body.decode("utf-8")
-                    except Exception:
-                        try:
-                            from modules.hypertext_parser import render_binary_as_text
-                            text_out = render_binary_as_text(body, title or "Document")
-                        except Exception:
-                            text_out = body.decode("utf-8", errors="replace")
-                    Path(path).write_text(text_out, encoding="utf-8", newline="\n")
-                else:
-                    Path(path).write_text(body or "", encoding="utf-8", newline="\n")
-            messagebox.showinfo("Export", f"Saved:\n{path}")
-        except Exception as e:
-            messagebox.showerror("Export", f"Could not save:\n{e}")
+        Path(path).write_text(doc["body"], encoding="utf-8")
+        messagebox.showinfo("Export", f"Saved to:\n{path}")
 
     def _import_directory(self):
         dir_path = filedialog.askdirectory(title="Select Folder to Import")
@@ -790,6 +969,7 @@ class DemoKitGUI(tk.Tk):
         if doc:
             self._render_document(doc)
 
+
     def _on_delete_clicked(self):
         """Delete the currently selected document from the sidebar and clear the pane."""
         sel = self.sidebar.selection()
@@ -826,7 +1006,6 @@ class DemoKitGUI(tk.Tk):
         self._image_enlarged = False
         messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
 
-
 def sanitize_doc(doc):
     if isinstance(doc["body"], bytes):
         try:
@@ -834,4 +1013,3 @@ def sanitize_doc(doc):
         except UnicodeDecodeError:
             doc["body"] = doc["body"].decode("utf-8", errors="replace")
     return doc
-

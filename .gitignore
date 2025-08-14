@@ -30,3 +30,11 @@ exported_docs
 openai.key
 exported_docs/
 OpenAI.key
+document_*.txt
+*.patch
+*.bak
+*.new
+*.diff
+fb_*token.txt
+dist/
+build/
