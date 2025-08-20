@@ -6,10 +6,20 @@ class DocumentStore:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.create_table()
-        # Ensure ai_memory exists on startup
         ensure_ai_memory_table(self.conn)  
+        self.ensure_content_type_column()   # ensure type column exists
     def get_connection(self):
         return self.conn    # Return the actual connection object
+
+    # modules/document_store.py  (add near your other helpers)
+    def ensure_content_type_column(self):
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(documents)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "content_type" not in cols:
+            # Back-compat: default existing docs to text/plain
+            self.conn.execute("ALTER TABLE documents ADD COLUMN content_type TEXT DEFAULT 'text/plain'")
+            self.conn.commit()
 
     def create_table(self):
         self.conn.execute(
