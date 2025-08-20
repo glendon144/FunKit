@@ -1,41 +1,54 @@
 """
-opml_extras_plugin_v2.py — Robust OPML extras for PiKit/DemoKit
+Unified OPML Extras Plugin for PiKit/DemoKit
+- Merges features and fixes across older v2/v3 variants
+- Provides compatibility wrappers for v3-style function names
 
-Features restored/enhanced:
-  • URL → OPML  (async fetch with timeouts; adds docs; opens the first)
-  • Convert → OPML (uses selection if present from ANY Text widget, else whole doc)
-UI integrations:
-  • Adds toolbar buttons ("Convert → OPML", "URL → OPML") when possible
-  • Adds a top-level "OPML" menu with the same actions
-Hotkeys (several variants for reliability across platforms/WM):
-  • Ctrl+U                → URL → OPML
-  • Ctrl+Shift+O          → Convert → OPML
-  • Ctrl+Alt+O            → Convert → OPML
-  • F6                    → Convert → OPML
+Features
+  • Convert → OPML (uses selection from ANY Text if available, else whole doc)
+  • URL → OPML (async fetch with timeouts; adds docs; opens the first)
+  • Batch Convert Selected → OPML (best-effort selection discovery)
 
-Install (in main.py, after creating the app):
-    from modules.opml_extras_plugin_v2 import install_opml_extras_into_app
-    install_opml_extras_into_app(app)
+UI
+  • Adds 'OPML' menu with all actions
+  • Tries to add toolbar buttons if a toolbar can be found
+  • Hotkeys:
+      Ctrl+U               → URL → OPML
+      Ctrl+Shift+O         → Convert → OPML
+      Ctrl+Alt+O           → Convert → OPML
+      F6                   → Convert → OPML
 """
+
 from __future__ import annotations
 
+
+# ---------- Engine resolution (works with different casing/modules) ----------
 def _resolve_engine():
     EngineConfig = None
     build_opml_from_html = None
     build_opml_from_text = None
     try:
-        from modules.aopmlengine import EngineConfig as EC, build_opml_from_html as BOH, build_opml_from_text as BOT
+        from modules.aopmlengine import (
+            EngineConfig as EC,
+            build_opml_from_html as BOH,
+            build_opml_from_text as BOT,
+        )
         EngineConfig, build_opml_from_html, build_opml_from_text = EC, BOH, BOT
     except Exception:
         try:
-            from modules.Aopmlengine import EngineConfig as EC, build_opml_from_html as BOH, build_opml_from_text as BOT
+            from modules.Aopmlengine import (
+                EngineConfig as EC,
+                build_opml_from_html as BOH,
+                build_opml_from_text as BOT,
+            )
             EngineConfig, build_opml_from_html, build_opml_from_text = EC, BOH, BOT
         except Exception:
             pass
     return EngineConfig, build_opml_from_html, build_opml_from_text
 
+
+# ---------- Helpers ----------
 def _get_any_selection_text(app) -> str | None:
-    """Try several common text widgets; fall back to widget with focus; return selected text or None."""
+    """Try to pull selected text from any likely Text widget. Return None if nothing."""
     import tkinter as tk
     candidates = []
     for name in ("_text", "text", "main_text", "editor", "body_text", "content_text"):
@@ -58,9 +71,23 @@ def _get_any_selection_text(app) -> str | None:
             continue
     return None
 
+
+def _decode_bytes_best(raw: bytes, fallback="utf-8") -> str:
+    try:
+        return raw.decode("utf-8")
+    except Exception:
+        try:
+            import chardet  # type: ignore
+
+            enc = chardet.detect(raw).get("encoding") or fallback
+            return raw.decode(enc, errors="replace")
+        except Exception:
+            return raw.decode(fallback, errors="replace")
+
+
+# ---------- Core actions (as bound methods on the GUI class) ----------
 def _convert_current_to_opml(self):
     from tkinter import messagebox
-    import re
 
     EC, BOH, BOT = _resolve_engine()
     if EC is None:
@@ -75,20 +102,21 @@ def _convert_current_to_opml(self):
         messagebox.showerror("Convert → OPML", "Document not found.")
         return
 
-    # get title/body (tuple or dict)
+    # doc may be tuple or dict
     if isinstance(doc, dict):
         title = doc.get("title") or "Document"
-        body  = doc.get("body") or ""
+        body = doc.get("body") or ""
     else:
         title = (doc[1] if len(doc) > 1 else "Document") or "Document"
-        body  = (doc[2] if len(doc) > 2 else "")
+        body = (doc[2] if len(doc) > 2 else "")
 
-    # Prefer selection (from any Text); else whole body
+    # Prefer selection; else whole body
     content = _get_any_selection_text(self)
     if not content:
         if isinstance(body, (bytes, bytearray)):
             try:
                 from modules.hypertext_parser import render_binary_as_text  # type: ignore
+
                 content = render_binary_as_text(body, title)
             except Exception:
                 try:
@@ -98,9 +126,9 @@ def _convert_current_to_opml(self):
         else:
             content = str(body or "")
 
-    # Decide HTML vs Text
     low = content.lower()
-    is_htmlish = ("<html" in low) or ("<body" in low) or ("<div" in low) or ("<h1" in low) or ("<p" in low)
+    is_htmlish = any(t in low for t in ("<html", "<body", "<div", "<h1", "<p"))
+
     cfg = EC(enable_ai=False, title=f"{title} (OPML)", owner_name=None)
     try:
         opml_doc = BOH(content, cfg) if is_htmlish else BOT(content, cfg)
@@ -109,7 +137,7 @@ def _convert_current_to_opml(self):
         messagebox.showerror("Convert → OPML", f"Failed to build OPML:\n{e}")
         return
 
-    # Save new doc and open
+    # Save & open
     try:
         new_id = self.doc_store.add_document(f"{title} (OPML)", xml)
         if hasattr(self, "_on_link_click"):
@@ -121,10 +149,69 @@ def _convert_current_to_opml(self):
     except Exception as e:
         messagebox.showerror("Convert → OPML", f"DB error:\n{e}")
 
+
+def _batch_convert_selected_to_opml(self):
+    """Best-effort batch conversion of 'selected' documents to OPML."""
+    from tkinter import messagebox
+
+    # Try a few common selection APIs
+    selected_ids = []
+    for getter in (
+        "get_selected_doc_ids",
+        "get_selected_ids",
+        "get_checked_ids",
+        "_get_selected_doc_ids",
+    ):
+        fn = getattr(self, getter, None)
+        if callable(fn):
+            try:
+                selected_ids = list(fn()) or []
+                break
+            except Exception:
+                pass
+
+    # Fallback: if the sidebar has a tree/list, try to peek
+    if not selected_ids:
+        try:
+            sidebar = getattr(self, "sidebar", None)
+            if sidebar and hasattr(sidebar, "get_selected_ids"):
+                selected_ids = list(sidebar.get_selected_ids()) or []
+        except Exception:
+            pass
+
+    # If still nothing, just do current
+    if not selected_ids and getattr(self, "current_doc_id", None):
+        selected_ids = [self.current_doc_id]
+
+    if not selected_ids:
+        messagebox.showinfo("Batch Convert → OPML", "No documents selected.")
+        return
+
+    converted, failed = 0, 0
+    prev = getattr(self, "current_doc_id", None)
+
+    for did in selected_ids:
+        try:
+            self.current_doc_id = did
+            _convert_current_to_opml(self)
+            converted += 1
+        except Exception:
+            failed += 1
+
+    self.current_doc_id = prev
+    if failed:
+        messagebox.showwarning(
+            "Batch Convert → OPML",
+            f"Converted {converted} document(s), {failed} failed.",
+        )
+    else:
+        messagebox.showinfo("Batch Convert → OPML", f"Converted {converted} document(s).")
+
+
 def _import_url_as_opml(self):
-    """Fetch one or more URLs and import as OPML document(s), async + safe timeouts."""
+    """Fetch one or more URLs and import as OPML (async, timeouts, safe)."""
     from tkinter import simpledialog as SD, messagebox
-    import threading, time, re
+    import time
 
     EC, BOH, BOT = _resolve_engine()
     if EC is None:
@@ -138,54 +225,57 @@ def _import_url_as_opml(self):
     if not urls:
         return
 
-    # Busy cursor + tiny cancel dialog
+    # Busy + progress dialog
     try:
-        self.config(cursor="watch"); self.update_idletasks()
+        self.config(cursor="watch")
+        self.update_idletasks()
     except Exception:
         pass
-    self._cancel_url_import = False
 
     import tkinter as tk
     from tkinter import ttk
+
+    self._cancel_url_import = False
     dlg = tk.Toplevel(self)
     dlg.title("Fetching URLs…")
     dlg.geometry("360x120+60+60")
-    dlg.transient(self); dlg.grab_set()
-    tk.Label(dlg, text=f"Fetching {len(urls)} URL(s)…", anchor="w").pack(fill="x", padx=10, pady=(10,4))
+    dlg.transient(self)
+    dlg.grab_set()
+    tk.Label(dlg, text=f"Fetching {len(urls)} URL(s)…", anchor="w").pack(fill="x", padx=10, pady=(10, 4))
     status = tk.StringVar(value="Working…")
     tk.Label(dlg, textvariable=status, anchor="w").pack(fill="x", padx=10)
+
     def _cancel():
         self._cancel_url_import = True
         status.set("Cancelling…")
         btn.config(state="disabled")
-    btn = ttk.Button(dlg, text="Cancel", command=_cancel); btn.pack(pady=10)
+
+    btn = ttk.Button(dlg, text="Cancel", command=_cancel)
+    btn.pack(pady=10)
 
     MAX_BYTES, CONNECT_TIMEOUT, READ_TIMEOUT, TOTAL_BUDGET = 600_000, 8, 8, 12
 
-    def _decode_bytes(raw: bytes, fallback="utf-8") -> str:
-        try:
-            return raw.decode("utf-8")
-        except Exception:
-            try:
-                import chardet  # type: ignore
-                enc = chardet.detect(raw).get("encoding") or fallback
-                return raw.decode(enc, errors="replace")
-            except Exception:
-                return raw.decode(fallback, errors="replace")
-
     def _fetch(url: str) -> str:
         start = time.monotonic()
+
         # requests first
         try:
             import requests  # type: ignore
+
             headers = {
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                              "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 PiKit/OPML",
+                "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 PiKit/OPML",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Connection": "close",
             }
-            with requests.get(url, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True, allow_redirects=True) as r:
+            with requests.get(
+                url,
+                headers=headers,
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                stream=True,
+                allow_redirects=True,
+            ) as r:
                 r.raise_for_status()
                 ctype = (r.headers.get("Content-Type") or "").lower()
                 if "text/html" not in ctype and "xml" not in ctype:
@@ -198,22 +288,27 @@ def _import_url_as_opml(self):
                         raw.extend(chunk)
                     if len(raw) > MAX_BYTES or (time.monotonic() - start) > TOTAL_BUDGET:
                         break
-            return _decode_bytes(bytes(raw))
+            return _decode_bytes_best(bytes(raw))
         except Exception:
             pass
+
         # urllib fallback
         try:
             import urllib.request, socket
+
             old_timeout = socket.getdefaulttimeout()
             socket.setdefaulttimeout(READ_TIMEOUT)
             try:
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                                  "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 PiKit/OPML",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Connection": "close",
-                })
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 PiKit/OPML",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Connection": "close",
+                    },
+                )
                 with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
                     ctype = (resp.headers.get("Content-Type") or "").lower()
                     if "text/html" not in ctype and "xml" not in ctype:
@@ -232,15 +327,18 @@ def _import_url_as_opml(self):
                             break
             finally:
                 socket.setdefaulttimeout(old_timeout)
-            return _decode_bytes(bytes(raw))
+            return _decode_bytes_best(bytes(raw))
         except Exception as e:
             raise RuntimeError(str(e))
 
     def work():
+        import re
+
         created_payloads, failed = [], []
         for i, url in enumerate(urls, 1):
             if self._cancel_url_import:
-                failed.append((url, "Cancelled")); break
+                failed.append((url, "Cancelled"))
+                break
             try:
                 self.after(0, lambda i=i, url=url: status.set(f"[{i}/{len(urls)}] {url}"))
                 html = _fetch(url)
@@ -248,16 +346,18 @@ def _import_url_as_opml(self):
                 title = m.group(1).strip() if m else url
                 title = re.sub(r"\s+", " ", title)
                 opml_title = f"{title} (OPML)"
+
+                EC, BOH, BOT = _resolve_engine()
                 cfg = EC(enable_ai=False, title=opml_title, owner_name=None)
                 try:
                     opml_doc = BOH(html or "", cfg)
                     xml = opml_doc.to_xml()
                 except Exception:
-                    import re as _re
-                    text_only = _re.sub(r"<[^>]+>", " ", html or "", flags=_re.S)
-                    text_only = _re.sub(r"\s+", " ", text_only)
+                    text_only = re.sub(r"<[^>]+>", " ", html or "", flags=re.S)
+                    text_only = re.sub(r"\s+", " ", text_only)
                     opml_doc = BOT(text_only[:MAX_BYTES], cfg)
                     xml = opml_doc.to_xml()
+
                 created_payloads.append({"title": opml_title, "xml": xml})
             except Exception as e:
                 failed.append((url, f"{e.__class__.__name__}: {e}"))
@@ -278,7 +378,10 @@ def _import_url_as_opml(self):
                     created.append(nid)
                 except Exception as e:
                     failed.append((payload["title"], f"DB: {e}"))
-            self._refresh_sidebar()
+            try:
+                self._refresh_sidebar()
+            except Exception:
+                pass
             if created:
                 try:
                     self._on_link_click(created[0])
@@ -287,23 +390,32 @@ def _import_url_as_opml(self):
             if failed:
                 snippet = "; ".join(f"{u} → {err}" for u, err in failed[:3])
                 extra = " (showing first 3)" if len(failed) > 3 else ""
+                from tkinter import messagebox
+
                 messagebox.showwarning("URL → OPML", f"Imported {len(created)}; {len(failed)} failed{extra}: {snippet}")
             else:
+                from tkinter import messagebox
+
                 messagebox.showinfo("URL → OPML", f"Imported {len(created)} OPML document(s).")
 
         self.after(0, finish_on_ui)
 
     import threading
+
     threading.Thread(target=work, daemon=True).start()
 
+
+# ---------- Attach methods to the GUI class ----------
 def attach_opml_extras_plugin(DemoKitGUI_cls):
     setattr(DemoKitGUI_cls, "_convert_current_to_opml", _convert_current_to_opml)
     setattr(DemoKitGUI_cls, "_import_url_as_opml", _import_url_as_opml)
+    setattr(DemoKitGUI_cls, "_batch_convert_selected_to_opml", _batch_convert_selected_to_opml)
 
+
+# ---------- UI wiring ----------
 def _add_toolbar_buttons(app) -> int:
     """Find a plausible toolbar and add buttons; returns count added."""
     try:
-        import tkinter as tk
         from tkinter import ttk
     except Exception:
         return 0
@@ -313,15 +425,20 @@ def _add_toolbar_buttons(app) -> int:
         parent = getattr(app, attr, None)
         if parent:
             try:
-                btn1 = ttk.Button(parent, text="Convert → OPML", command=lambda a=app: a._convert_current_to_opml())
-                btn1.pack(side="left", padx=2)
-                btn2 = ttk.Button(parent, text="URL → OPML", command=lambda a=app: a._import_url_as_opml())
-                btn2.pack(side="left", padx=2)
-                return 2
+                ttk.Button(parent, text="Convert → OPML", command=lambda a=app: a._convert_current_to_opml()).pack(
+                    side="left", padx=2
+                )
+                ttk.Button(parent, text="URL → OPML", command=lambda a=app: a._import_url_as_opml()).pack(
+                    side="left", padx=2
+                )
+                ttk.Button(parent, text="Batch → OPML", command=lambda a=app: a._batch_convert_selected_to_opml()).pack(
+                    side="left", padx=2
+                )
+                return 3
             except Exception:
                 pass
 
-    # Heuristic: scan children for a Frame with a BACK or SAVE AS TEXT button
+    # Heuristic: scan children for a Frame that already has familiar buttons
     target = None
     for w in app.winfo_children():
         try:
@@ -332,32 +449,41 @@ def _add_toolbar_buttons(app) -> int:
         for c in kids:
             try:
                 t = c.cget("text")
-                if isinstance(t, str) and t.strip().upper() in {"BACK", "SAVE AS TEXT", "CONVERT TO OPML", "URL → OPML", "URL -> OPML"}:
+                if isinstance(t, str) and t.strip().upper() in {"BACK", "SAVE AS TEXT", "CONVERT TO OPML", "URL → OPML"}:
                     score += 1
             except Exception:
                 pass
         if score >= 1:
-            target = w; break
+            target = w
+            break
 
     if target:
         try:
-            btn1 = ttk.Button(target, text="Convert → OPML", command=lambda a=app: a._convert_current_to_opml())
-            btn1.pack(side="left", padx=2)
-            btn2 = ttk.Button(target, text="URL → OPML", command=lambda a=app: a._import_url_as_opml())
-            btn2.pack(side="left", padx=2)
-            return 2
+            from tkinter import ttk
+
+            ttk.Button(target, text="Convert → OPML", command=lambda a=app: a._convert_current_to_opml()).pack(
+                side="left", padx=2
+            )
+            ttk.Button(target, text="URL → OPML", command=lambda a=app: a._import_url_as_opml()).pack(
+                side="left", padx=2
+            )
+            ttk.Button(target, text="Batch → OPML", command=lambda a=app: a._batch_convert_selected_to_opml()).pack(
+                side="left", padx=2
+            )
+            return 3
         except Exception:
             return 0
     return 0
 
+
 def _ensure_opml_menu(app) -> int:
-    """Add a dedicated 'OPML' menu with our actions; returns 1 if added/updated."""
+    """Add/refresh a dedicated 'OPML' menu with our actions."""
     try:
         import tkinter as tk
     except Exception:
         return 0
 
-    # Try to get the root menubar
+    # Try to get the menubar
     menubar = None
     try:
         menubar = app.nametowidget(app["menu"]) if app["menu"] else None
@@ -365,16 +491,14 @@ def _ensure_opml_menu(app) -> int:
         menubar = getattr(app, "menubar", None)
 
     if menubar is None:
-        # Create a minimal menubar
         try:
             menubar = tk.Menu(app)
             app.config(menu=menubar)
         except Exception:
             return 0
 
-    # Add or replace "OPML" cascade
+    # Find existing OPML cascade or create
     opml_menu = None
-    # Try to find existing index
     try:
         end = menubar.index("end")
     except Exception:
@@ -388,21 +512,25 @@ def _ensure_opml_menu(app) -> int:
             except Exception:
                 continue
     if opml_menu is None:
-        import tkinter as tk
         opml_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="OPML", menu=opml_menu)
 
-    # Populate items (idempotent-ish: we clear first)
+    # Populate
     try:
         opml_menu.delete(0, "end")
     except Exception:
         pass
-    opml_menu.add_command(label="Convert → OPML\tCtrl+Shift+O / Ctrl+Alt+O / F6", command=lambda a=app: a._convert_current_to_opml())
+    opml_menu.add_command(
+        label="Convert → OPML\tCtrl+Shift+O / Ctrl+Alt+O / F6", command=lambda a=app: a._convert_current_to_opml()
+    )
+    opml_menu.add_command(label="Batch Convert Selected → OPML", command=lambda a=app: a._batch_convert_selected_to_opml())
     opml_menu.add_command(label="URL → OPML\tCtrl+U", command=lambda a=app: a._import_url_as_opml())
     return 1
 
+
+# ---------- Public installer ----------
 def install_opml_extras_into_app(app) -> None:
-    """Attach methods, add toolbar buttons and OPML menu, bind multiple hotkeys."""
+    """Attach methods, add toolbar buttons and OPML menu, bind hotkeys."""
     cls = app.__class__
     attach_opml_extras_plugin(cls)
 
@@ -423,3 +551,16 @@ def install_opml_extras_into_app(app) -> None:
             app.bind_all(seq, lambda e, a=app: a._convert_current_to_opml())
     except Exception as e:
         print("[WARN] OPML extras: key bindings failed:", e)
+
+
+# ---------- Compatibility wrappers (for v3-style names) ----------
+def _action_convert_selection_to_opml(app):  # noqa: N802  (keep exact name for compatibility)
+    return getattr(app, "_convert_current_to_opml")()
+
+
+def _action_import_url_as_opml(app):  # noqa: N802
+    return getattr(app, "_import_url_as_opml")()
+
+
+def _action_batch_convert_selected_to_opml(app):  # noqa: N802
+    return getattr(app, "_batch_convert_selected_to_opml")()

@@ -10,6 +10,13 @@ import json
 import re
 import xml.etree.ElementTree as ET
 
+# === Tri-model integration imports ===
+from concurrent.futures import ThreadPoolExecutor
+from tkinter import messagebox
+from modules.tri_pipeline import run_tri_pipeline
+from modules.ai_memory import get_memory, set_memory
+
+
 # PiKit modules
 from modules import hypertext_parser, image_generator, document_store
 from modules.renderer import render_binary_as_text
@@ -32,7 +39,7 @@ class DemoKitGUI(tk.Tk):
         self.logger: Logger = getattr(processor, "logger", Logger())
         self.current_doc_id: int | None = None
         self.history: list[int] = []
-
+# idempotent;  safe to call each startup
         # image state
         self._last_pil_img: Image.Image | None = None
         self._last_tk_img: ImageTk.PhotoImage | None = None
@@ -72,10 +79,19 @@ class DemoKitGUI(tk.Tk):
         menubar.add_cascade(label="View", menu=viewmenu)
 
         self.config(menu=menubar)
+        # AI menu
+        ai_menu = tk.Menu(menubar, tearoff=0)
+        ai_menu.add_command(label="ASK (Tri)", command=self.ask_tri_action, accelerator="Ctrl+Shift+A")
+        menubar.add_cascade(label="AI", menu=ai_menu)
+
         # Keyboard shortcut
         self.bind("<Control-t>", lambda e: self.on_tree_button())
 
+        self.bind_all("<Control-Shift-A>", lambda e: self.ask_tri_action())
+
         self._refresh_sidebar()
+        # Thread pool (keeps UI responsive during API calls)
+        self.executor = getattr(self, "executor", ThreadPoolExecutor(max_workers=2))
 
     # ---------------- Settings ----------------
 
@@ -173,6 +189,7 @@ class DemoKitGUI(tk.Tk):
             ("TREE", self.on_tree_button),
             ("OPEN OPML", self._open_opml_from_main),
             ("ASK", self._handle_ask),
+            ("ASK (Tri)", self.ask_tri_action),
             ("BACK", self._go_back),
             ("DELETE", self._on_delete_clicked),
             ("IMAGE", self._handle_image),
@@ -188,6 +205,7 @@ class DemoKitGUI(tk.Tk):
     def _build_context_menu(self):
         self.context_menu = tk.Menu(self, tearoff=0)
         self.context_menu.add_command(label="ASK", command=self._handle_ask)
+        self.context_menu.add_command(label="ASK (Tri)", command=self.ask_tri_action)
         self.context_menu.add_command(label="Delete", command=self._on_delete_clicked)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Import", command=self._import_doc)
@@ -345,7 +363,121 @@ class DemoKitGUI(tk.Tk):
         if hasattr(win, "_update_numbering"):
             win._update_numbering()
 
-    # ---- OPML-in-document-pane helpers ----
+    # ---- Tri Action Ask   ----
+    
+    # ---- Tri Action Ask ----
+    def ask_tri_action(self):
+        """
+        Run the tri-model pipeline on the current selection (or whole doc if no selection),
+        create a new "Tri Synthesis" document, and insert a markdown link [label](doc:ID)
+        into the source document. Rendering/styling of links is handled by hypertext_parser.
+        """
+        try:
+            # 1) Determine current doc and selection
+            doc_id = getattr(self, "current_doc_id", None)
+            if not doc_id:
+                messagebox.showinfo("PiKit", "Select a document first.")
+                return
+
+            # Try to get selected text if any
+            sel_text = ""
+            try:
+                start = self.text.index(tk.SEL_FIRST)  # type: ignore[attr-defined]
+                end = self.text.index(tk.SEL_LAST)     # type: ignore[attr-defined]
+                sel_text = self.text.get(start, end).strip()  # type: ignore[attr-defined]
+            except Exception:
+                sel_text = ""
+
+            # Fallback to whole document body
+            if sel_text:
+                user_text = sel_text
+            else:
+                row = self.doc_store.get_document(doc_id)  # uses doc_store, not GUI rendering
+                user_text = row["body"] if isinstance(row, dict) else str(row)
+
+            if not isinstance(user_text, str) or not user_text.strip():
+                messagebox.showinfo("PiKit", "Nothing to analyze in this document.")
+                return
+
+            # 2) Load memory and ensure executor
+            conn = self.doc_store.get_connection()
+            memory = get_memory(conn, key="global")
+
+            if not hasattr(self, "executor"):
+                self.executor = ThreadPoolExecutor(max_workers=2)
+
+            if hasattr(self, "set_status"):
+                self.set_status("Running 3-model synthesis…")
+
+            # 3) Run pipeline in background
+            fut = self.executor.submit(run_tri_pipeline, user_text, memory)
+
+            def on_done(f):
+                try:
+                    out = f.result()
+                except Exception as e:
+                    if hasattr(self, "set_status"):
+                        self.set_status("Ready")
+                    messagebox.showerror("PiKit", f"Tri-model error: {e}")
+                    return
+
+                # 4) Create new doc with final synthesis
+                new_id = self.doc_store.add_document("Tri Synthesis", out.final)
+
+                # 5) Update memory breadcrumbs
+                memory.setdefault("recent_immediate", [])
+                memory["recent_immediate"] = (memory["recent_immediate"] + [out.immediate])[-10:]
+                set_memory(conn, memory, key="global")
+
+                # 6) Insert a **markdown** link only (no GUI styling; hypertext_parser handles it)
+                label = sel_text if sel_text else "See synthesis"
+                link_md = f"[{label}](doc:{new_id})"
+
+                if sel_text:
+                    # Replace selected text with link in the widget
+                    try:
+                        self.text.delete(start, end)  # type: ignore[attr-defined]
+                        self.text.insert(start, link_md)  # type: ignore[attr-defined]
+                    except Exception:
+                        # Fallback: replace first occurrence in stored body
+                        body = self.doc_store.get_document(doc_id)["body"]
+                        body = body.replace(sel_text, link_md, 1)
+                        self.doc_store.update_document(doc_id, body)
+                else:
+                    # Append at end of widget
+                    try:
+                        self.text.insert(tk.END, "\n" + link_md)  # type: ignore[attr-defined]
+                    except Exception:
+                        body = self.doc_store.get_document(doc_id)["body"]
+                        body = (body or "") + "\n" + link_md
+                        self.doc_store.update_document(doc_id, body)
+
+                # 7) Persist updated body from widget (best effort)
+                try:
+                    new_body = self.text.get("1.0", tk.END)  # type: ignore[attr-defined]
+                    self.doc_store.update_document(doc_id, new_body)
+                except Exception:
+                    pass
+
+                # 8) Refresh UI
+                try:
+                    self._refresh_sidebar()
+                except Exception:
+                    pass
+                try:
+                    self._render_document(self.doc_store.get_document(doc_id))
+                except Exception:
+                    pass
+
+                if hasattr(self, "set_status"):
+                    self.set_status("Ready")
+
+            # Schedule Tk-safe callback
+            self.after(0, lambda: fut.add_done_callback(lambda _f: self.after(0, on_done, _f)))
+        except Exception as e:
+            if hasattr(self, "set_status"):
+                self.set_status("Ready")
+            messagebox.showerror("PiKit", f"ASK (Tri) failed: {e}")
 
     def _ensure_opml_widgets(self):
         """Create (or reuse) the OPML widgets embedded in the document pane."""
@@ -834,4 +966,3 @@ def sanitize_doc(doc):
         except UnicodeDecodeError:
             doc["body"] = doc["body"].decode("utf-8", errors="replace")
     return doc
-

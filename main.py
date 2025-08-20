@@ -1,12 +1,11 @@
 from pathlib import Path
-
 from modules.document_store import DocumentStore
 from modules.command_processor import CommandProcessor
 from modules.gui_tkinter import DemoKitGUI
 from modules.ai_interface import AIInterface
 
 # Plugins
-from modules.opml_extras_plugin_v3 import install_opml_extras_into_app
+from modules.opml_extras_plugin import install_opml_extras_into_app
 from modules.save_as_text_plugin_v3 import install_save_as_text_into_app
 # NOTE: Do NOT import the old modules.opml_extras_plugin.
 # NOTE: Do NOT import export_doc_patch; gui_tkinter already has robust _export_doc.
