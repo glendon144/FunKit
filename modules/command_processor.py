@@ -1,8 +1,10 @@
 import os
+from pathlib import Path
 from typing import Any, Tuple
 
 from modules.logger import Logger
 from modules.document_store import DocumentStore
+from modules.directory_import import import_text_files_from_directory
 
 # Try both possible locations for render_binary_as_text
 try:
@@ -197,3 +199,48 @@ class CommandProcessor:
             "Import CSV": self.doc_store.import_csv,
             "Export CSV": self.doc_store.export_csv,
         }
+
+    # -------- External file operations --------
+
+    def import_document_from_path(self, path: str) -> int:
+        """Import a text file from *path* and return new document ID."""
+        text = Path(path).read_text(encoding="utf-8")
+        title = Path(path).stem
+        return self.doc_store.add_document(title, text)
+
+    def export_document_to_path(self, doc_id: int, path: str) -> None:
+        """Export document *doc_id* to filesystem path."""
+        row = self.doc_store.get_document(doc_id)
+        if hasattr(row, "keys"):
+            body = row.get("body") if row else ""
+        elif isinstance(row, dict):
+            body = row.get("body")
+        else:
+            body = row[2] if row and len(row) > 2 else ""
+        p = Path(path)
+        if isinstance(body, (bytes, bytearray)):
+            p.write_bytes(bytes(body))
+        else:
+            p.write_text(str(body), encoding="utf-8")
+
+    def save_binary_as_text(self, doc_id: int) -> str:
+        """Render binary content as text and store back into document."""
+        row = self.doc_store.get_document(doc_id)
+        if not row:
+            return ""
+        _, _, body = _normalize_row(row)
+        if isinstance(body, (bytes, bytearray)) or ("\x00" in str(body)):
+            text = render_binary_as_text(body)
+            self.doc_store.update_document(doc_id, text)
+            return text
+        return str(body)
+
+    def import_opml_from_path(self, path: str) -> int:
+        """Import an OPML/XML file from *path* and return new document ID."""
+        content = Path(path).read_text(encoding="utf-8", errors="replace")
+        title = Path(path).stem
+        return self.doc_store.add_document(title, content)
+
+    def import_directory(self, directory: str) -> None:
+        """Bulk-import text files from a directory."""
+        import_text_files_from_directory(self.doc_store, directory)
