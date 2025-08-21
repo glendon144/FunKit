@@ -28,12 +28,6 @@ SETTINGS_FILE = Path("pikit_settings.json")
 
 
 class DemoKitGUI(tk.Tk):
-
-    def _on_image_clicked(self):
-        """Image generation disabled here: viewing images is local-only.
-        Hook your OpenAI-powered generation here if/when you want it."""
-        from tkinter import messagebox
-        messagebox.showinfo("Image", "Local image rendering is enabled. Generation is disabled in this build.")
     """PiKit / DemoKit GUI with OPML auto-rendering in the document pane, TreeView integration, and utilities."""
 
     SIDEBAR_WIDTH = 320
@@ -624,25 +618,16 @@ class DemoKitGUI(tk.Tk):
     def _looks_like_image(self, title: str) -> bool:
         return title.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))
 
-
-    def _show_image_bytes(self, data: bytes):
-        """Display raw image bytes using Pillow (no network)."""
+    def _show_image_bytes(self, raw: bytes):
         from io import BytesIO
-        try:
-            from PIL import Image, ImageTk
-        except Exception as e:
-            self.text.delete("1.0", "end")
-            self.text.insert("1.0", f"[Pillow not available: {e}]")
-            return
-        try:
-            pil_img = Image.open(BytesIO(data))
-            self._last_pil_img = pil_img
-            tk_img = ImageTk.PhotoImage(pil_img)
-            self._last_tk_img = tk_img
-            self.img_label.configure(image=tk_img)
-        except Exception as e:
-            self.text.delete("1.0", "end")
-            self.text.insert("1.0", f"[image decode failed: {e}]")
+        pil = Image.open(BytesIO(raw))
+        # Size to window-ish
+        w, h = max(100, self.winfo_width() - 40), max(100, self.winfo_height() - 40)
+        pil.thumbnail((w, h))
+        self._last_pil_img = pil
+        self._last_tk_img = ImageTk.PhotoImage(pil)
+        self.img_label.configure(image=self._last_tk_img)
+
     def _hide_image(self):
         if self.img_label and self.img_label.winfo_manager():
             self.img_label.configure(image="")
@@ -902,61 +887,79 @@ class DemoKitGUI(tk.Tk):
     # ---------------- Rendering ----------------
 
 
-
     def _render_document(self, doc):
-        """Render a document with content-type aware behavior (LOCAL ONLY for images).
-        - text/opml → outline in the text pane
-        - image/*   → inline via Pillow (no API calls)
-        - default   → text + green-link parsing
+        """Render a document with content-type aware behavior.
+        - text/opml → render OPML tree
+        - image/*   → render inline via PIL in the image pane
+        - default   → render text and parse green links
         """
-        import tkinter as tk
-
+        # Extract fields; support dict rows and legacy tuple rows
         if isinstance(doc, dict):
-            body  = doc.get("body")
+            body = doc.get("body")
             ctype = (doc.get("content_type") or "").lower()
             title = doc.get("title") or ""
             doc_id = doc.get("id")
         else:
-            body  = doc[2] if len(doc) > 2 else ""
+            body = doc[2] if len(doc) > 2 else ""
             ctype = ""
             title = doc[1] if len(doc) > 1 else ""
             doc_id = doc[0] if len(doc) > 0 else None
 
-        # OPML
-        if isinstance(body, str) and ("<opml" in body.lower() or ctype == "text/opml"):
-            try:
-                self._render_opml_from_string(body)
-            except Exception as e:
-                self.text.delete("1.0", tk.END)
-                self.text.insert("1.0", f"[OPML error: {e}]\n\n{body}")
+        # OPML path: prefer explicit type, else sniff for <opml>
+        try:
+            body_text = body if isinstance(body, str) else ""
+        except Exception:
+            body_text = ""
+        if (ctype == "text/opml") or (isinstance(body, str) and "<opml" in body_text.lstrip("\ufeff\r\n\t ").lower()):
+            self._render_opml_from_string(body_text)
             return
 
-        # Hide OPML UI (if any)
-        try: self._hide_opml()
-        except Exception: pass
+        # Non-OPML: hide OPML widgets if your UI uses them
+        try:
+            self._hide_opml()
+        except Exception:
+            pass
 
-        # LOCAL image path (no network)
+        # Image path: show bytes inline using existing helper
         if isinstance(body, (bytes, bytearray)) and (ctype.startswith("image/") or body[:4] in (b"\xff\xd8\xff\xe0", b"\x89PNG", b"GIF8")):
-            self.text.delete("1.0", tk.END)
             try:
-                self._show_image_bytes(bytes(body))
-                self.text.insert("end", f"\n{title or 'Image'} ({ctype or 'image'})\n")
+                self.text.delete("1.0", tk.END)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "_show_image_bytes"):
+                    self._show_image_bytes(bytes(body))
+                    cap = f"\n{title or 'Image'} ({ctype or 'image'})\n"
+                    try:
+                        self.text.insert("end", cap)
+                    except Exception:
+                        pass
+                else:
+                    self.text.delete("1.0", tk.END)
+                    self.text.insert("1.0", "[image renderer not available]")
             except Exception as e:
+                self.text.delete("1.0", tk.END)
                 self.text.insert("1.0", f"[image render failed: {e}]")
             return
 
-        # Text + links
-        try: self.img_label.configure(image="")
-        except Exception: pass
+        # Default: render as text (decode bytes best-effort) and parse green links
+        try:
+            self.img_label.configure(image="")
+        except Exception:
+            pass
         self.text.delete("1.0", tk.END)
         if isinstance(body, (bytes, bytearray)):
-            try: body = body.decode("utf-8")
-            except Exception: body = body.decode("latin-1", errors="replace")
-        self.text.insert("1.0", body or "")
+            try:
+                body = body.decode("utf-8")
+            except Exception:
+                body = body.decode("latin-1", errors="replace")
+        body_text = body or ""
+        self.text.insert("1.0", body_text)
         try:
             from modules import hypertext_parser
-            hypertext_parser.parse_links(self.text, body or "", self._on_link_click)
-        except Exception: pass
+            hypertext_parser.parse_links(self.text, body_text, self._on_link_click)
+        except Exception:
+            pass
     def _on_link_click(self, doc_id):
         if self.current_doc_id is not None:
             self.history.append(self.current_doc_id)
