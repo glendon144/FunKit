@@ -72,8 +72,10 @@ class DocumentStore:
         )
         result = []
         for row in cur.fetchall():
-            body = row["body"] or b""
-            if isinstance(body , bytes):
+            body = row["body"]
+            if body is None:
+                body = ""
+            if isinstance(body, bytes):
                 # binary file - show size placeholder
                 desc = f"[{len(body)} bytes]"
             else:
