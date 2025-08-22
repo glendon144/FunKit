@@ -1,31 +1,28 @@
 import os
 import threading
 import tkinter as tk
-from tkinter import ttk, simpledialog, messagebox
+from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
 from PIL import ImageTk, Image
+import subprocess
+import sys
 import json
 import re
 import xml.etree.ElementTree as ET
 
 # === Tri-model integration imports ===
 from concurrent.futures import ThreadPoolExecutor
+from tkinter import messagebox
 from modules.tri_pipeline import run_tri_pipeline
 from modules.ai_memory import get_memory, set_memory
 
 
 # PiKit modules
-from modules import hypertext_parser, image_generator
+from modules import hypertext_parser, image_generator, document_store
+from modules.renderer import render_binary_as_text
 from modules.logger import Logger
+from modules.directory_import import import_text_files_from_directory
 from modules.TreeView import open_tree_view
-from modules.gui_actions import (
-    import_doc,
-    export_doc,
-    save_binary_as_text,
-    import_directory,
-    open_opml_from_main,
-    export_and_launch_server,
-)
 
 SETTINGS_FILE = Path("pikit_settings.json")
 
@@ -48,6 +45,7 @@ class DemoKitGUI(tk.Tk):
         self.logger: Logger = getattr(processor, "logger", Logger())
         self.current_doc_id: int | None = None
         self.history: list[int] = []
+        self._suppress_sidebar_select = False  # prevent re-entrant selects
 # idempotent;  safe to call each startup
         # image state
         self._last_pil_img: Image.Image | None = None
@@ -72,10 +70,10 @@ class DemoKitGUI(tk.Tk):
         menubar = tk.Menu(self)
         # File menu
         filemenu = tk.Menu(menubar, tearoff=0)
-        filemenu.add_command(label="Import", command=lambda: import_doc(self))
-        filemenu.add_command(label="Export Current", command=lambda: export_doc(self))
+        filemenu.add_command(label="Import", command=self._import_doc)
+        filemenu.add_command(label="Export Current", command=self._export_doc)
         filemenu.add_separator()
-        filemenu.add_command(label="Export to Intraweb", command=lambda: export_and_launch_server(self))
+        filemenu.add_command(label="Export to Intraweb", command=self.export_and_launch_server)
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
@@ -156,6 +154,8 @@ class DemoKitGUI(tk.Tk):
             self.sidebar.insert("", "end", values=(doc["id"], doc["title"], doc["description"]))
 
     def _on_select(self, event):
+        if getattr(self, "_suppress_sidebar_select", False):
+            return
         sel = self.sidebar.selection()
         if not sel:
             return
@@ -196,15 +196,15 @@ class DemoKitGUI(tk.Tk):
 
         acts = [
             ("TREE", self.on_tree_button),
-            ("OPEN OPML", lambda: open_opml_from_main(self)),
+            ("OPEN OPML", self._open_opml_from_main),
             ("ASK", self._handle_ask),
             ("ASK (Tri)", self.ask_tri_action),
             ("BACK", self._go_back),
             ("DELETE", self._on_delete_clicked),
             ("IMAGE", self._handle_image),
-            ("FLASK", lambda: export_and_launch_server(self)),
-            ("DIR IMPORT", lambda: import_directory(self)),
-            ("SAVE AS TEXT", lambda: save_binary_as_text(self)),
+            ("FLASK", self.export_and_launch_server),
+            ("DIR IMPORT", self._import_directory),
+            ("SAVE AS TEXT", self._save_binary_as_text),
         ]
         for i, (lbl, cmd) in enumerate(acts):
             ttk.Button(btns, text=lbl, command=cmd).grid(row=0, column=i, sticky="we", padx=(0, 4))
@@ -217,9 +217,9 @@ class DemoKitGUI(tk.Tk):
         self.context_menu.add_command(label="ASK (Tri)", command=self.ask_tri_action)
         self.context_menu.add_command(label="Delete", command=self._on_delete_clicked)
         self.context_menu.add_separator()
-        self.context_menu.add_command(label="Import", command=lambda: import_doc(self))
-        self.context_menu.add_command(label="Export", command=lambda: export_doc(self))
-        self.context_menu.add_command(label="Save Binary As Text", command=lambda: save_binary_as_text(self))
+        self.context_menu.add_command(label="Import", command=self._import_doc)
+        self.context_menu.add_command(label="Export", command=self._export_doc)
+        self.context_menu.add_command(label="Save Binary As Text", command=self._save_binary_as_text)
 
     def _show_context_menu(self, event):
         try:
@@ -258,6 +258,27 @@ class DemoKitGUI(tk.Tk):
         self.processor.query_ai(
             selected_text, cid, on_success, lambda *_: None, prefix=prefix, sel_start=None, sel_end=None
         )
+    # ---------------- Sidebar sync ----------------
+    def _select_tree_item_for_doc(self, doc_id: int):
+        """Highlight and scroll the sidebar row for a given doc_id."""
+        tv = self.sidebar
+        found = None
+        # Fast scan top-level items; adjust to walk subtree if needed
+        for iid in tv.get_children(""):
+            vals = tv.item(iid, "values") or ()
+            if vals and str(vals[0]) == str(doc_id):
+                found = iid
+                break
+        if found:
+            prev = getattr(self, "_suppress_sidebar_select", False)
+            try:
+                self._suppress_sidebar_select = True
+                tv.selection_set(found)
+                tv.focus(found)
+                tv.see(found)
+            finally:
+                self.after_idle(lambda: setattr(self, "_suppress_sidebar_select", prev))
+
 
     def _go_back(self):
         if not self.history:
@@ -268,6 +289,8 @@ class DemoKitGUI(tk.Tk):
         doc = self.doc_store.get_document(prev)
         if doc:
             self._render_document(doc)
+            # Sync sidebar highlight with current doc
+            self.after(0, lambda d=prev: self._select_tree_item_for_doc(d))
         else:
             messagebox.showerror("BACK", f"Document {prev} not found.")
 
@@ -674,8 +697,6 @@ class DemoKitGUI(tk.Tk):
             win.bind("<Button-1>", lambda e: self._toggle_image())
             self._image_enlarged = True
         else:
-            from tkinter import filedialog
-
             default = f"document_{self.current_doc_id}.png"
             path = filedialog.asksaveasfilename(
                 title="Save Image",
@@ -717,8 +738,192 @@ class DemoKitGUI(tk.Tk):
 
     # ---------------- Import/Export ----------------
 
+    def _import_doc(self):
+        path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if not path:
+            return
+        body = Path(path).read_text(encoding="utf-8")
+        title = Path(path).stem
+        nid = self.doc_store.add_document(title, body)
+        self.logger.info(f"Imported {nid}")
+        self._refresh_sidebar()
+        doc = self.doc_store.get_document(nid)
+        if doc:
+            self._render_document(doc)
+
+    def _export_doc(self):
+        """Robust export: picks sensible default extension, writes bytes for binary and text for text."""
+        from tkinter import filedialog, messagebox
+        from pathlib import Path
+
+        if getattr(self, "current_doc_id", None) is None:
+            messagebox.showwarning("Export", "No document selected.")
+            return
+
+        # Fetch and normalize
+        doc = self.doc_store.get_document(self.current_doc_id)
+        if hasattr(doc, "keys"):  # sqlite3.Row-like
+            title = doc["title"] if "title" in doc.keys() else "Document"
+            body = doc["body"] if "body" in doc.keys() else ""
+        elif isinstance(doc, dict):
+            title = doc.get("title") or "Document"
+            body = doc.get("body") or ""
+        else:  # tuple/list row: (id, title, body, ...)
+            title = doc[1] if len(doc) > 1 else "Document"
+            body = doc[2] if len(doc) > 2 else ""
+
+        # Infer extension/filetypes
+        ext = ".txt"
+        filetypes = [("Text", "*.txt"), ("All files", "*.*")]
+        if isinstance(body, (bytes, bytearray)):
+            b = bytes(body)
+            if b.startswith(b"\x89PNG\r\n\x1a\n"):
+                ext, filetypes = ".png", [("PNG image", "*.png"), ("All files", "*.*")]
+            elif b.startswith(b"\xff\xd8\xff"):
+                ext, filetypes = ".jpg", [("JPEG image", "*.jpg;*.jpeg"), ("All files", "*.*")]
+            elif b[:6] in (b"GIF87a", b"GIF89a"):
+                ext, filetypes = ".gif", [("GIF image", "*.gif"), ("All files", "*.*")]
+            elif b.startswith(b"%PDF-"):
+                ext, filetypes = ".pdf", [("PDF", "*.pdf"), ("All files", "*.*")]
+            elif b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+                ext, filetypes = ".webp", [("WebP", "*.webp"), ("All files", "*.*")]
+            else:
+                try:
+                    b.decode("utf-8")
+                    ext, filetypes = ".txt", [("Text", "*.txt"), ("All files", "*.*")]
+                except Exception:
+                    ext, filetypes = ".bin", [("Binary", "*.bin"), ("All files", "*.*")]
+        else:
+            s = (body or "").lstrip()
+            low = s.lower()
+            if low.startswith("<opml"):
+                ext, filetypes = ".opml", [("OPML", "*.opml"), ("XML", "*.xml"), ("All files", "*.*")]
+            elif low.startswith("<html") or ("<body" in low) or ("<div" in low):
+                ext, filetypes = ".html", [("HTML", "*.html;*.htm"), ("All files", "*.*")]
+            elif low.startswith("<svg"):
+                ext, filetypes = ".svg", [("SVG", "*.svg"), ("All files", "*.*")]
+            else:
+                ext, filetypes = ".txt", [("Text", "*.txt"), ("All files", "*.*")]
+
+        # Ask destination
+        safe = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in (title or "Document")).strip() or "Document"
+        path = filedialog.asksaveasfilename(
+            title="Export Document",
+            defaultextension=ext,
+            initialfile=f"{safe}{ext}",
+            filetypes=filetypes,
+        )
+        if not path:
+            return
+
+        # Write
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(body, (bytes, bytearray)) and ext not in (".txt", ".opml", ".html", ".svg", ".xml"):
+                Path(path).write_bytes(bytes(body))
+            else:
+                if isinstance(body, (bytes, bytearray)):
+                    # Convert bytes→text if the user chose a texty extension
+                    try:
+                        text_out = body.decode("utf-8")
+                    except Exception:
+                        try:
+                            from modules.hypertext_parser import render_binary_as_text
+                            text_out = render_binary_as_text(body, title or "Document")
+                        except Exception:
+                            text_out = body.decode("utf-8", errors="replace")
+                    Path(path).write_text(text_out, encoding="utf-8", newline="\n")
+                else:
+                    Path(path).write_text(body or "", encoding="utf-8", newline="\n")
+            messagebox.showinfo("Export", f"Saved:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export", f"Could not save:\n{e}")
+
+    def _import_directory(self):
+        dir_path = filedialog.askdirectory(title="Select Folder to Import")
+        if not dir_path:
+            return
+        imported, skipped = import_text_files_from_directory(dir_path, self.doc_store)
+        msg = f"Imported {imported} file(s), skipped {skipped}."
+        print("[INFO]", msg)
+        messagebox.showinfo("Directory Import", msg)
+        self._refresh_sidebar()
+
+    def export_and_launch_server(self):
+        export_path = Path("exported_docs")
+        export_path.mkdir(exist_ok=True)
+        for doc in self.doc_store.get_document_index():
+            data = dict(self.doc_store.get_document(doc["id"]))
+            if data:
+                data = sanitize_doc(data)
+                with open(export_path / f"{data['id']}.json", "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+
+        def launch():
+            fp = Path("modules") / "flask_server.py"
+            if fp.exists():
+                subprocess.Popen([sys.executable, str(fp)])
+
+        threading.Thread(target=launch, daemon=True).start()
+        messagebox.showinfo("Server Started", "Flask server launched at http://127.0.0.1:5050")
+
+    def _save_binary_as_text(self):
+        selected_item = self.sidebar.selection()
+        if not selected_item:
+            return
+        doc_id_str = self.sidebar.item(selected_item, "values")[0]
+        if not str(doc_id_str).isdigit():
+            print(f"Warning: selected text is not a valid integer '{doc_id_str}'")
+            return
+        doc_id = int(doc_id_str)
+        doc = self.doc_store.get_document(doc_id)
+        if not doc or len(doc) < 3:
+            return
+        body = doc[2]
+        if isinstance(body, bytes) or ("\x00" in str(body)):
+            print("Binary detected, converting to text using render_binary_as_text.")
+            body = render_binary_as_text(body)
+            self.doc_store.update_document(doc_id, body)
+            self._render_document(self.doc_store.get_document(doc_id))
+        else:
+            print("Document is already text. Skipping overwrite.")
+        content = self.processor.get_strings_content(doc_id)
+        self.doc_store.update_document(doc_id, content)
+        doc = self.doc_store.get_document(doc_id)
+        self._render_document(doc)
+
     # ---------------- Open OPML (import) ----------------
 
+    def _open_opml_from_main(self):
+        path = filedialog.askopenfilename(
+            title="Open OPML/XML", filetypes=[("OPML / XML", "*.opml *.xml"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            messagebox.showerror("Open OPML", f"Failed to read file:\n{e}")
+            return
+        title = Path(path).stem
+        try:
+            new_id = self.doc_store.add_document(title, content)
+        except Exception as e:
+            messagebox.showerror("Open OPML", f"Failed to import OPML to DB:\n{e}")
+            return
+        self._refresh_sidebar()
+        self.current_doc_id = new_id
+        doc = self.doc_store.get_document(new_id)
+        if doc:
+            self._render_document(doc)
+        if getattr(self, "tree_win", None) and self.tree_win.winfo_exists():
+            try:
+                self.tree_win.load_opml_file(path)
+                self.tree_win.deiconify()
+                self.tree_win.lift()
+                self._apply_opml_expand_depth()
+            except Exception:
+                pass
 
     # ---------------- Rendering ----------------
 
@@ -823,4 +1028,21 @@ class DemoKitGUI(tk.Tk):
         messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
 
 
+def sanitize_doc(doc):
+    """
+    Normalize doc['body'] only for textual content.
+    Leave image/other binary bodies as bytes so the GUI can render them.
+    """
+    if not isinstance(doc, dict):
+        return doc
+    body = doc.get("body")
+    ctype = (doc.get("content_type") or "").lower()
+    if isinstance(body, (bytes, bytearray)):
+        if ctype.startswith("image/") or ctype in ("application/octet-stream",):
+            return doc
+        try:
+            doc["body"] = body.decode("utf-8")
+        except UnicodeDecodeError:
+            doc["body"] = body.decode("latin-1", errors="replace")
+    return doc
 
