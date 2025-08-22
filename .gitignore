@@ -38,3 +38,4 @@ document_*.txt
 fb_*token.txt
 dist/
 build/
+mistral-token

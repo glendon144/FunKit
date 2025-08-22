@@ -73,6 +73,19 @@ class CommandProcessor:
         except Exception as e:
             self.logger.error(f"AI query failed: {e}")
             return None
+    def add_document(self, title, body, content_type: str | None = None):
+        if content_type is None:
+           cur = self.conn.execute(
+           "INSERT INTO documents (title, body) VALUES (?, ?)",
+           (title, body)
+        )
+        else:
+            cur = self.conn.execute(
+                "INSERT INTO documents (title, body, content_type) VALUES (?, ?, ?)",
+                (title, body, content_type)
+        )
+        self.conn.commit()
+        return cur.lastrowid
 
     def query_ai(
         self,
@@ -101,6 +114,37 @@ class CommandProcessor:
         self.logger.info("AI query successful")
 
         # Create the new AI doc
+        def send_selection_to_ai(self, source_doc_id: int, prompt: str, embed_link: bool = True) -> int:
+            """
+            Send `prompt` to AI, create a new document with the response, and (optionally)
+            insert a green link into the source document.
+            """
+            reply = self.ai.complete(prompt)  # however you call into ai/local_ai_interface
+
+            # Guard: never silently create placeholder docs
+            if not isinstance(reply, str) or not reply.strip():
+                raise RuntimeError("AI returned empty/invalid text; refusing to create a placeholder document.")
+
+            # Create the AI reply doc with the actual content
+            new_doc_id = self.doc_store.add_document("AI Response", reply)
+
+            if embed_link and source_doc_id:
+                try:
+                    src = self.doc_store.get_document(source_doc_id)
+                    body = src["body"] if hasattr(src, "keys") else src[2]
+                    if isinstance(body, (bytes, bytearray)):
+                        # Don’t try to splice links into binary docs
+                        pass
+                    else:
+                        # Insert your green-link format (keep your existing style)
+                        link = f"[→ ({new_doc_id})]"
+                        updated = f"{body}\n\n{link}"
+                        self.doc_store.update_document_body(source_doc_id, updated)
+                except Exception as e:
+                    print(f"[WARN] Could not embed green link into source doc {source_doc_id}: {e}")
+
+            return new_doc_id
+
         new_doc_id = self.doc_store.add_document("AI Response", reply)
         self.logger.info(f"Created new document {new_doc_id}")
 
@@ -201,28 +245,34 @@ class CommandProcessor:
         }
 
     # -------- External file operations --------
-
     def import_document_from_path(self, path: str) -> int:
-        """Import a text file from *path* and return new document ID."""
-        text = Path(path).read_text(encoding="utf-8")
-        title = Path(path).stem
-        return self.doc_store.add_document(title, text)
+        """Import a file from *path* and return new document ID."""
+        p = Path(path)
+        title = p.stem
+        try:
+            text = p.read_text(encoding="utf-8")
+            return self.doc_store.add_document(title, text)
+        except UnicodeDecodeError:
+            data = p.read_bytes()                 # <- store as SQLite BLOB
+            return self.doc_store.add_document(title, data)
 
     def export_document_to_path(self, doc_id: int, path: str) -> None:
         """Export document *doc_id* to filesystem path."""
         row = self.doc_store.get_document(doc_id)
-        if hasattr(row, "keys"):
-            body = row.get("body") if row else ""
+
+        if hasattr(row, "keys"):                 # sqlite3.Row (row_factory already set)
+            body = row["body"] if row else ""
         elif isinstance(row, dict):
             body = row.get("body")
         else:
             body = row[2] if row and len(row) > 2 else ""
+
         p = Path(path)
         if isinstance(body, (bytes, bytearray)):
             p.write_bytes(bytes(body))
         else:
-            p.write_text(str(body), encoding="utf-8")
-
+            p.write_text("" if body is None else str(body), encoding="utf-8")
+ 
     def save_binary_as_text(self, doc_id: int) -> str:
         """Render binary content as text and store back into document."""
         row = self.doc_store.get_document(doc_id)
