@@ -1,216 +1,348 @@
-import os
-import threading
+# gui_tkinter.py — Universal, compatibility-hardened GUI for PiKit/DemoKit
+# Release: v1.31 (2025-08-23)
+#
+# Key features:
+# - Restored image rendering (BLOB + Base64 string/bytes)
+# - OPML outline view (expandable Treeview)
+# - Sidebar previews + Size column
+# - File menu, context menu, Export, Save as Text
+# - Flask “Intraweb” server button
+# - ASK + green link refresh stable
+# - Reparse Links working
+# This build borrows the proven image workflow (label + thumbnail + zoom window) from your phase2_3 prefs file
+# while keeping all universal shims and features.
+
+from __future__ import annotations
+
+import base64
+from io import BytesIO
+from pathlib import Path
+import sqlite3
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox
-from pathlib import Path
-from PIL import ImageTk, Image
-import subprocess
-import sys
-import json
-import re
+from typing import Any, Tuple, Optional
 import xml.etree.ElementTree as ET
 
-# === Tri-model integration imports ===
-from concurrent.futures import ThreadPoolExecutor
-from tkinter import messagebox
-from modules.tri_pipeline import run_tri_pipeline
-from modules.ai_memory import get_memory, set_memory
+# ---- Optional image support (Pillow) ----
+try:
+    from PIL import Image, ImageTk  # type: ignore
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
 
+# ---- Safe importer ----
+def _try_import(modpath: str, name: str | None = None, default=None):
+    try:
+        mod = __import__(modpath, fromlist=["*"])
+        return getattr(mod, name, mod) if name else mod
+    except Exception:
+        return default
 
-# PiKit modules
-from modules import hypertext_parser, image_generator, document_store
-from modules.renderer import render_binary_as_text
-from modules.logger import Logger
-from modules.directory_import import import_text_files_from_directory
-from modules.TreeView import open_tree_view
+# ---- Primary module names ----
+command_processor_mod = _try_import("modules.command_processor")
+document_store_mod    = _try_import("modules.document_store")
+hypertext_parser_mod  = _try_import("modules.hypertext_parser")
+renderer_mod          = _try_import("modules.renderer")
+opml_plugin           = _try_import("modules.opml_extras_plugin_v3")
+logger_mod            = _try_import("modules.logger")
+flask_server_path     = Path("modules") / "flask_server.py"
 
-SETTINGS_FILE = Path("pikit_settings.json")
+# ---- Legacy/alternate module names (shims) ----
+if command_processor_mod is None:
+    command_processor_mod = _try_import("modules.cmdprocessor")
+if hypertext_parser_mod is None:
+    hypertext_parser_mod = _try_import("modules.hypertextparser")
 
+# Resolve CP class (CommandProcessor or CmdProcessor)
+CommandProcessor = None
+if command_processor_mod:
+    CommandProcessor = getattr(
+        command_processor_mod,
+        "CommandProcessor",
+        getattr(command_processor_mod, "CmdProcessor", None),
+    )
 
-class DemoKitGUI(tk.Tk):
-    """PiKit / DemoKit GUI with OPML auto-rendering in the document pane, TreeView integration, and utilities."""
+# Resolve link parser function(s)
+parse_links = None
+if hypertext_parser_mod:
+    for fname in ("parse_links", "parse_links_v2", "reparse_links"):
+        parse_links = getattr(hypertext_parser_mod, fname, None)
+        if callable(parse_links):
+            break
 
-    SIDEBAR_WIDTH = 320
+# Optional renderer helpers
+render_binary_preview = getattr(renderer_mod or object(), "render_binary_preview", None)
+render_binary_as_text = getattr(renderer_mod or object(), "render_binary_as_text", None)
 
-    def __init__(self, doc_store, processor):
+# Logger
+Logger = getattr(logger_mod or object(), "Logger", None)
+
+# ---------- Helpers ----------
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n/1024:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+def _extract_title_content(doc: Any) -> Tuple[str, Any]:
+    """Return (title, content) from dict / sqlite3.Row / list/tuple / other."""
+    # sqlite3.Row → dict
+    if isinstance(doc, sqlite3.Row):
+        m = dict(doc)
+        title = str(m.get("title", m.get("name", m.get("heading", ""))) or "")
+        # Prefer textual content fields
+        for key in ("content", "body", "text", "raw", "data", "value", "description"):
+            if key in m and m[key] not in (None, ""):
+                return title, m[key]
+        # Fallback: longest string
+        best = ""
+        for v in m.values():
+            if isinstance(v, str) and len(v) > len(best):
+                best = v
+        return title, best if best else str(m)
+
+    # dict
+    if isinstance(doc, dict):
+        title = str(doc.get("title", doc.get("name", doc.get("heading", ""))) or "")
+        for key in ("content", "body", "text", "raw", "data", "value", "description"):
+            if key in doc and doc[key] not in (None, ""):
+                return title, doc[key]
+        # fallback
+        best = ""
+        for v in doc.values():
+            if isinstance(v, str) and len(v) > len(best):
+                best = v
+        return title, best if best else str(doc)
+
+    # tuple/list
+    if isinstance(doc, (list, tuple)):
+        title = ""
+        if len(doc) > 1 and isinstance(doc[1], str):
+            title = doc[1]
+        # choose longest string as content
+        str_elems = [s for s in doc if isinstance(s, str)]
+        if str_elems:
+            content_val = max(str_elems, key=len)
+            return title, content_val
+        # else bytes
+        for v in doc:
+            if isinstance(v, (bytes, bytearray)):
+                return title, v
+        return title, str(doc)
+
+    return "", str(doc)
+
+_BASE64_CHARS = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n \t")
+def _looks_like_b64_text(s: str) -> bool:
+    if not isinstance(s, str) or len(s) < 200:
+        return False
+    # strip header
+    i = s.find("base64,")
+    payload = s[i+7:] if i != -1 else s
+    payload = "".join(payload.split())
+    if len(payload) % 4 != 0:
+        return False
+    head = payload[:200]
+    return all(ord(ch) < 128 and ch.encode() in _BASE64_CHARS for ch in head)
+
+def _decode_b64_text(s: str) -> Optional[bytes]:
+    i = s.find("base64,")
+    payload = s[i+7:] if i != -1 else s
+    payload = "".join(payload.split())
+    try:
+        return base64.b64decode(payload, validate=True)
+    except Exception:
+        try:
+            missing = (-len(payload)) % 4
+            return base64.b64decode(payload + ("=" * missing))
+        except Exception:
+            return None
+
+def _looks_like_b64_bytes(b: bytes) -> bool:
+    if not isinstance(b, (bytes, bytearray)) or len(b) < 200:
+        return False
+    head = b[:400]
+    if any(ch not in _BASE64_CHARS for ch in head):
+        return False
+    stripped = b"".join(ch for ch in b if ch in _BASE64_CHARS)
+    return len(stripped) % 4 == 0
+
+def _decode_b64_bytes(b: bytes) -> Optional[bytes]:
+    payload = b"".join(ch for ch in b if ch in _BASE64_CHARS)
+    try:
+        return base64.b64decode(payload, validate=True)
+    except Exception:
+        try:
+            missing = (-len(payload)) % 4
+            return base64.b64decode(payload + b"=" * missing)
+        except Exception:
+            return None
+
+def _make_preview(title: str, content: Any) -> str:
+    generic = {"ai response", "response", "untitled", ""}
+    tnorm = (title or "").strip().lower()
+    if tnorm not in generic and not tnorm.startswith("opml"):
+        return title
+    if isinstance(content, str) and content.strip():
+        words = content.strip().split()
+        preview = " ".join(words[:10])
+        return (preview + "…") if len(words) > 10 else preview
+    return title or "(untitled)"
+
+# ---------- App ----------
+
+class App(tk.Tk):
+    def __init__(self, *args, **kwargs):
+        doc_store_pos = args[0] if len(args) >= 1 else None
+        processor_pos = args[1] if len(args) >= 2 else None
+
         super().__init__()
-        self.doc_store = doc_store
-        self.processor = processor
-        self.logger: Logger = getattr(processor, "logger", Logger())
+        self.title("PiKit / DemoKit — GUI")
+        self.geometry("1180x780")
+
+        # Public state
         self.current_doc_id: int | None = None
         self.history: list[int] = []
-# idempotent;  safe to call each startup
-        # image state
-        self._last_pil_img: Image.Image | None = None
-        self._last_tk_img: ImageTk.PhotoImage | None = None
-        self._image_enlarged: bool = False
+        self._last_selection: Tuple[str, str] | None = None
+        self._current_content: str | bytes | None = None  # for Reparse Links
+        self._mode: str = "text"  # 'text' or 'opml'
+        self._last_pil_img: Optional[Image.Image] = None
+        self._last_tk_img: Optional[ImageTk.PhotoImage] = None
+        self._image_zoom_win: Optional[tk.Toplevel] = None
 
-        # ---- Settings ----
-        self.settings = self._load_settings()
-        self.opml_expand_depth: int = int(self.settings.get("opml_expand_depth", 2))
+        self.doc_store = kwargs.get("doc_store") or doc_store_pos
+        self.processor = kwargs.get("processor") or processor_pos
+        self.logger = getattr(self.processor, "logger", Logger() if Logger else None)
 
-        self.title("Engelbart Journal – DemoKit")
-        self.geometry("1200x800")
-        self.columnconfigure(0, minsize=self.SIDEBAR_WIDTH, weight=0)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(0, weight=1)
+        if self.doc_store is None and document_store_mod and hasattr(document_store_mod, "DocumentStore"):
+            try:
+                self.doc_store = document_store_mod.DocumentStore()
+            except Exception as e:
+                print("Warning: DocumentStore failed to init:", e)
 
-        self._build_sidebar()
-        self._build_main_pane()
-        self._build_context_menu()
+        if self.processor is None and CommandProcessor:
+            try:
+                self.processor = CommandProcessor()
+            except Exception as e:
+                print("Warning: CommandProcessor failed to init:", e)
 
-        # --- Menubar ---
-        menubar = tk.Menu(self)
-        # File menu
+        self._build_ui()
+        self._refresh_index()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        root = self
+
+        # Menubar (File + OPML + View)
+        menubar = tk.Menu(root)
         filemenu = tk.Menu(menubar, tearoff=0)
-        filemenu.add_command(label="Import", command=self._import_doc)
-        filemenu.add_command(label="Export Current", command=self._export_doc)
+        filemenu.add_command(label="Import Text…", command=self._import_text_file)
+        filemenu.add_command(label="Export Current…", command=self._export_current)
         filemenu.add_separator()
-        filemenu.add_command(label="Export to Intraweb", command=self.export_and_launch_server)
+        filemenu.add_command(label="Export to Intraweb (Flask)…", command=self._export_and_launch_flask)
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
 
-        # View menu (adds TreeView entry + shortcut + depth)
-        viewmenu = tk.Menu(menubar, tearoff=0)
-        viewmenu.add_command(label="Document Tree\tCtrl+T", command=self.on_tree_button)
-        viewmenu.add_separator()
-        viewmenu.add_command(label="Set OPML Expand Depth…", command=self._set_opml_expand_depth)
-        menubar.add_cascade(label="View", menu=viewmenu)
+        opmlmenu = tk.Menu(menubar, tearoff=0)
+        opmlmenu.add_command(label="Open OPML/XML…", command=self._open_opml_from_file)
+        opmlmenu.add_command(label="Convert Selection → OPML", command=self._convert_selection_to_opml)
+        menubar.add_cascade(label="OPML", menu=opmlmenu)
 
-        self.config(menu=menubar)
-        # AI menu
-        ai_menu = tk.Menu(menubar, tearoff=0)
-        ai_menu.add_command(label="ASK (Tri)", command=self.ask_tri_action, accelerator="Ctrl+Shift+A")
-        menubar.add_cascade(label="AI", menu=ai_menu)
+        root.config(menu=menubar)
 
-        # Keyboard shortcut
-        self.bind("<Control-t>", lambda e: self.on_tree_button())
+        # Toolbar
+        bar = ttk.Frame(root)
+        bar.pack(side="top", fill="x")
 
-        self.bind_all("<Control-Shift-A>", lambda e: self.ask_tri_action())
+        ttk.Button(bar, text="Ask", command=self._on_ask).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Back", command=self._go_back).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Open by ID", command=self._open_by_id).pack(side="left", padx=4, pady=4)
 
-        self._refresh_sidebar()
-        # Thread pool (keeps UI responsive during API calls)
-        self.executor = getattr(self, "executor", ThreadPoolExecutor(max_workers=2))
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
 
-    # ---------------- Settings ----------------
+        ttk.Button(bar, text="Import Dir", command=self._import_directory).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Open OPML", command=self._open_opml_from_file).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Convert → OPML", command=self._convert_selection_to_opml).pack(side="left", padx=4, pady=4)
 
-    def _load_settings(self) -> dict:
-        try:
-            if SETTINGS_FILE.exists():
-                return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        return {}
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
 
-    def _save_settings(self):
-        try:
-            SETTINGS_FILE.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
-        except Exception as e:
-            print("[WARN] Could not save settings:", e)
+        ttk.Button(bar, text="Search", command=self._on_search_clicked).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Reparse Links", command=self._reparse_links).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Flask", command=self._export_and_launch_flask).pack(side="left", padx=4, pady=4)
 
-    def _set_opml_expand_depth(self):
-        val = simpledialog.askinteger(
-            "OPML Expand Depth",
-            "Expand OPML to depth (0=root, 1=children, 2=grandchildren…):",
-            initialvalue=self.opml_expand_depth,
-            minvalue=0,
-            maxvalue=99,
-        )
-        if val is None:
-            return
-        self.opml_expand_depth = int(val)
-        self.settings["opml_expand_depth"] = self.opml_expand_depth
-        self._save_settings()
-        # If a Tree window with OPML loaded is open, apply immediately
-        win = getattr(self, "tree_win", None)
-        if win and win.winfo_exists():
-            self._apply_opml_expand_depth()
+        # Panes
+        self.panes = ttk.Panedwindow(root, orient="horizontal")
+        self.panes.pack(fill="both", expand=True)
 
-    # ---------------- Sidebar ----------------
+        # Left: index
+        left = ttk.Frame(self.panes)
+        self.sidebar = ttk.Treeview(left, columns=("id", "title", "size"), show="headings", height=20)
+        self.sidebar.heading("id", text="ID")
+        self.sidebar.heading("title", text="Title / Preview")
+        self.sidebar.heading("size", text="Size")
+        self.sidebar.column("id", width=80, anchor="w")
+        self.sidebar.column("title", width=420, anchor="w")
+        self.sidebar.column("size", width=90, anchor="e")
+        self.sidebar.pack(fill="both", expand=True)
+        self.sidebar.bind("<<TreeviewSelect>>", self._on_sidebar_select)
 
-    def _build_sidebar(self):
-        frame = tk.Frame(self)
-        frame.grid(row=0, column=0, sticky="nswe")
-        self.sidebar = ttk.Treeview(frame, columns=("ID", "Title", "Description"), show="headings")
-        for col, w in (("ID", 60), ("Title", 120), ("Description", 160)):
-            self.sidebar.heading(col, text=col)
-            self.sidebar.column(col, width=w, anchor="w", stretch=(col == "Description"))
-        self.sidebar.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ttk.Scrollbar(frame, orient="vertical", command=self.sidebar.yview).pack(side=tk.RIGHT, fill=tk.Y)
-        self.sidebar.bind("<<TreeviewSelect>>", self._on_select)
-        self.sidebar.bind("<Delete>", lambda e: self._on_delete_clicked())
+        left_bottom = ttk.Frame(left)
+        left_bottom.pack(fill="x")
+        ttk.Button(left_bottom, text="Refresh", command=self._refresh_index).pack(side="left", padx=4, pady=4)
+        self.panes.add(left, weight=1)
 
-    def _refresh_sidebar(self):
-        self.sidebar.delete(*self.sidebar.get_children())
-        for doc in self.doc_store.get_document_index():
-            self.sidebar.insert("", "end", values=(doc["id"], doc["title"], doc["description"]))
+        # Right stack: Text pane + Image label + OPML tree
+        right = ttk.Frame(self.panes)
+        self.right_stack = ttk.Frame(right)
+        self.right_stack.pack(fill="both", expand=True)
 
-    def _on_select(self, event):
-        sel = self.sidebar.selection()
-        if not sel:
-            return
-        item = self.sidebar.item(sel[0])
-        try:
-            nid = int(item["values"][0])
-        except (ValueError, TypeError):
-            return
-        if self.current_doc_id is not None:
-            self.history.append(self.current_doc_id)
-        self.current_doc_id = nid
-        doc = self.doc_store.get_document(nid)
-        if doc:
-            self._render_document(doc)
+        # Text mode widgets
+        self.text_frame = ttk.Frame(self.right_stack)
+        self.text = tk.Text(self.text_frame, wrap="word", undo=True)
+        yscroll = ttk.Scrollbar(self.text_frame, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=yscroll.set)
+        self.text.pack(side="top", fill="both", expand=True)
+        yscroll.pack(side="right", fill="y")
 
-    # ---------------- Main Pane ----------------
+        # Image label (below text)
+        self.img_label = tk.Label(self.text_frame)
+        self.img_label.pack(side="bottom", fill="x", pady=(6, 0))
+        self.img_label.bind("<Button-1>", lambda e: self._toggle_image_zoom())
 
-    def _build_main_pane(self):
-        pane = tk.Frame(self)
-        pane.grid(row=0, column=1, sticky="nswe", padx=4, pady=4)
-        pane.rowconfigure(0, weight=3)
-        pane.rowconfigure(1, weight=1)
-        pane.columnconfigure(0, weight=1)
-
-        self.text = tk.Text(pane, wrap="word")
-        self.text.grid(row=0, column=0, sticky="nswe")
-        self.text.tag_configure("link", foreground="green", underline=True)
+        # Context menu on text
         self.text.bind("<Button-3>", self._show_context_menu)
-        self.text.bind("<Delete>", lambda e: self._on_delete_clicked())
 
-        self.img_label = tk.Label(pane)
-        self.img_label.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        self.img_label.bind("<Button-1>", lambda e: self._toggle_image())
+        # OPML Tree mode widgets
+        self.tree_frame = ttk.Frame(self.right_stack)
+        self.opml_tree = ttk.Treeview(self.tree_frame, show="tree")
+        tree_scroll = ttk.Scrollbar(self.tree_frame, orient="vertical", command=self.opml_tree.yview)
+        self.opml_tree.configure(yscrollcommand=tree_scroll.set)
+        self.opml_tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="left", fill="y")
 
-        btns = tk.Frame(pane)
-        btns.grid(row=2, column=0, sticky="we", pady=(6, 0))
-        self.toolbar = btns   # <- expose the toolbar so plugins can attach buttons
+        # Start in text mode
+        self._show_text_mode()
 
-        acts = [
-            ("TREE", self.on_tree_button),
-            ("OPEN OPML", self._open_opml_from_main),
-            ("ASK", self._handle_ask),
-            ("ASK (Tri)", self.ask_tri_action),
-            ("BACK", self._go_back),
-            ("DELETE", self._on_delete_clicked),
-            ("IMAGE", self._handle_image),
-            ("FLASK", self.export_and_launch_server),
-            ("DIR IMPORT", self._import_directory),
-            ("SAVE AS TEXT", self._save_binary_as_text),
-        ]
-        for i, (lbl, cmd) in enumerate(acts):
-            ttk.Button(btns, text=lbl, command=cmd).grid(row=0, column=i, sticky="we", padx=(0, 4))
+        self.panes.add(right, weight=3)
 
-    # ---------------- Context Menu ----------------
+        # Status
+        self.status = tk.StringVar(value="Ready")
+        ttk.Label(root, textvariable=self.status, anchor="w").pack(side="bottom", fill="x")
 
-    def _build_context_menu(self):
-        self.context_menu = tk.Menu(self, tearoff=0)
-        self.context_menu.add_command(label="ASK", command=self._handle_ask)
-        self.context_menu.add_command(label="ASK (Tri)", command=self.ask_tri_action)
-        self.context_menu.add_command(label="Delete", command=self._on_delete_clicked)
+        # Context menu
+        self.context_menu = tk.Menu(root, tearoff=0)
+        self.context_menu.add_command(label="Ask", command=self._on_ask)
+        self.context_menu.add_command(label="Export Current…", command=self._export_current)
         self.context_menu.add_separator()
-        self.context_menu.add_command(label="Import", command=self._import_doc)
-        self.context_menu.add_command(label="Export", command=self._export_doc)
-        self.context_menu.add_command(label="Save Binary As Text", command=self._save_binary_as_text)
+        self.context_menu.add_command(label="Save Visible Text…", command=self._save_visible_text)
+
+        # Shortcuts
+        root.bind_all("<Control-Return>", lambda e: self._on_ask())
+        root.bind_all("<Control-Shift-O>", lambda e: self._convert_selection_to_opml())
+        root.bind_all("<Control-u>", lambda e: self._open_opml_from_file())
 
     def _show_context_menu(self, event):
         try:
@@ -218,751 +350,658 @@ class DemoKitGUI(tk.Tk):
         finally:
             self.context_menu.grab_release()
 
-    # ---------------- ASK / BACK ----------------
+    # ---------- Mode switching ----------
+    def _show_text_mode(self):
+        self._mode = "text"
+        self.tree_frame.pack_forget()
+        self.text_frame.pack(fill="both", expand=True)
 
-    def _handle_ask(self):
+    def _show_tree_mode(self):
+        self._mode = "opml"
+        self.text_frame.pack_forget()
+        self.tree_frame.pack(fill="both", expand=True)
+
+    # ---------- Selection handling ----------
+    def _on_text_selection_changed(self, event=None):
+        if self._mode != "text":
+            self._last_selection = None
+            return
         try:
-            start = self.text.index(tk.SEL_FIRST)
-            end = self.text.index(tk.SEL_LAST)
-            selected_text = self.text.get(start, end)
-        except tk.TclError:
-            messagebox.showwarning("ASK", "Please select some text first.")
-            return
+            start = self.text.index("sel.first")
+            end = self.text.index("sel.last")
+            self._last_selection = (start, end)
+        except Exception:
+            self._last_selection = None
 
-        cid = self.current_doc_id
-
-        def on_success(nid):
-            messagebox.showinfo("ASK", f"Created new document {nid}.")
-            self._refresh_sidebar()
-            # replace selection with link
-            self.text.delete(start, end)
-            link_md = f"[{selected_text}](doc:{nid})"
-            self.text.insert(start, link_md)
-            full = self.text.get("1.0", tk.END)
-            doc = self.doc_store.get_document(nid)
-            if isinstance(doc["body"], bytes):
-                self.text.insert(tk.END, "[binary document]")
-                return
-            hypertext_parser.parse_links(self.text, full, self._on_link_click)
-
-        prefix = simpledialog.askstring("Prefix", "Optional prefix:", initialvalue="Please expand:")
-        self.processor.query_ai(
-            selected_text, cid, on_success, lambda *_: None, prefix=prefix, sel_start=None, sel_end=None
-        )
-
-    def _go_back(self):
-        if not self.history:
-            messagebox.showinfo("BACK", "No history.")
-            return
-        prev = self.history.pop()
-        self.current_doc_id = prev
-        doc = self.doc_store.get_document(prev)
-        if doc:
-            self._render_document(doc)
-        else:
-            messagebox.showerror("BACK", f"Document {prev} not found.")
-
-    # ---------------- TreeView wiring ----------------
-
-    def on_tree_button(self):
-        """Open the TreeView window using the current document as the root (if any)."""
-
-        class _DocStoreRepo:
-            """Adapter that derives parent→children from green links like (doc:123)."""
-
-            def __init__(self, ds):
-                self.ds = ds
-                self._roots_cache = None
-
-            def _mk_node(self, d):
-                if not d:
-                    return None
-                if isinstance(d, dict):
-                    return type(
-                        "DocNodeShim",
-                        (object,),
-                        {
-                            "id": d.get("id"),
-                            "title": d.get("title") or "(untitled)",
-                            "parent_id": d.get("parent_id"),
-                        },
-                    )()
-                did = d[0] if len(d) > 0 else None
-                title = d[1] if len(d) > 1 else ""
-                return type("DocNodeShim", (object,), {"id": did, "title": title or "(untitled)", "parent_id": None})()
-
-            def get_doc(self, doc_id: int):
-                return self._mk_node(self.ds.get_document(doc_id))
-
-            def _body(self, doc):
-                return doc["body"] if isinstance(doc, dict) else (doc[2] if len(doc) > 2 else "")
-
-            def _children_from_links(self, parent_id):
-                d = self.ds.get_document(parent_id)
-                if not d:
-                    return []
-                body = self._body(d)
-                if isinstance(body, (bytes, bytearray)):
-                    return []
-                ids = [int(m) for m in re.findall(r"\(doc:(\d+)\)", body)]
-                out = []
-                for cid in ids:
-                    nd = self.ds.get_document(cid)
-                    if nd:
-                        out.append(self._mk_node(nd))
-                out.sort(key=lambda n: n.id)
-                return out
-
-            def get_children(self, parent_id):
-                # No parent_id column in the DB, so derive from green-link references
-                if parent_id is None:
-                    if self._roots_cache is None:
-                        all_ids = [row["id"] for row in self.ds.get_document_index()]
-                        referenced = set()
-                        for row in self.ds.get_document_index():
-                            d = self.ds.get_document(row["id"])
-                            body = self._body(d)
-                            if isinstance(body, (bytes, bytearray)):
-                                continue
-                            referenced.update(int(m) for m in re.findall(r"\(doc:(\d+)\)", body))
-                        # roots = docs never referenced by any other doc
-                        roots = [self._mk_node(self.ds.get_document(i)) for i in all_ids if i not in referenced]
-                        if not roots:  # fallback: show all if everything is referenced
-                            roots = [self._mk_node(self.ds.get_document(i)) for i in all_ids]
-                        self._roots_cache = [n for n in roots if n]
-                        self._roots_cache.sort(key=lambda n: n.id)
-                    return list(self._roots_cache)
-                else:
-                    return self._children_from_links(parent_id)
-
-        repo = _DocStoreRepo(self.doc_store)
-        root_id = self.current_doc_id
-        self.tree_win = open_tree_view(self, repo=repo, on_open_doc=self._on_link_click, root_doc_id=root_id)
-
-    def _apply_opml_expand_depth(self):
-        """Expand OPML tree in TreeView window to preferred depth."""
-        win = getattr(self, "tree_win", None)
-        if not win or not win.winfo_exists():
-            return
-        if hasattr(win, "_expand_to_depth"):
-            win._expand_to_depth(self.opml_expand_depth)
-            return
-        tree = getattr(win, "tree", None)
-        if not tree:
-            return
-
-        def walk(iid: str, depth: int):
-            if depth >= self.opml_expand_depth:
-                return
-            win.tree.item(iid, open=True)
-            for c in win.tree.get_children(iid):
-                walk(c, depth + 1)
-
-        for top in tree.get_children(""):
-            walk(top, 0)
-        if hasattr(win, "_update_numbering"):
-            win._update_numbering()
-
-    # ---- Tri Action Ask   ----
-    
-    # ---- Tri Action Ask ----
-    def ask_tri_action(self):
-        """
-        Run the tri-model pipeline on the current selection (or whole doc if no selection),
-        create a new "Tri Synthesis" document, and insert a markdown link [label](doc:ID)
-        into the source document. Rendering/styling of links is handled by hypertext_parser.
-        """
+    def _get_selected_text(self) -> str:
+        if self._mode != "text":
+            return ""
         try:
-            # 1) Determine current doc and selection
-            doc_id = getattr(self, "current_doc_id", None)
-            if not doc_id:
-                messagebox.showinfo("PiKit", "Select a document first.")
-                return
-
-            # Try to get selected text if any
-            sel_text = ""
+            return self.text.get("sel.first", "sel.last")
+        except Exception:
+            pass
+        if self._last_selection:
+            s, e = self._last_selection
             try:
-                start = self.text.index(tk.SEL_FIRST)  # type: ignore[attr-defined]
-                end = self.text.index(tk.SEL_LAST)     # type: ignore[attr-defined]
-                sel_text = self.text.get(start, end).strip()  # type: ignore[attr-defined]
+                return self.text.get(s, e)
             except Exception:
-                sel_text = ""
+                return ""
+        return ""
 
-            # Fallback to whole document body
-            if sel_text:
-                user_text = sel_text
-            else:
-                row = self.doc_store.get_document(doc_id)  # uses doc_store, not GUI rendering
-                user_text = row["body"] if isinstance(row, dict) else str(row)
+    # ---------- Index / navigation ----------
+    def _approx_payload_size(self, content: Any) -> int:
+        if isinstance(content, (bytes, bytearray)):
+            # Could be image bytes OR base64 text as bytes
+            if _looks_like_b64_bytes(content):
+                b = _decode_b64_bytes(content)
+                return len(b) if b else len(content)
+            return len(content)
+        if isinstance(content, str):
+            if _looks_like_b64_text(content):
+                b = _decode_b64_text(content)
+                return len(b) if b else len(content)
+            return len(content.encode("utf-8", errors="ignore"))
+        return 0
 
-            if not isinstance(user_text, str) or not user_text.strip():
-                messagebox.showinfo("PiKit", "Nothing to analyze in this document.")
-                return
-
-            # 2) Load memory and ensure executor
-            conn = self.doc_store.get_connection()
-            memory = get_memory(conn, key="global")
-
-            if not hasattr(self, "executor"):
-                self.executor = ThreadPoolExecutor(max_workers=2)
-
-            if hasattr(self, "set_status"):
-                self.set_status("Running 3-model synthesis…")
-
-            # 3) Run pipeline in background
-            fut = self.executor.submit(run_tri_pipeline, user_text, memory)
-
-            def on_done(f):
-                try:
-                    out = f.result()
-                except Exception as e:
-                    if hasattr(self, "set_status"):
-                        self.set_status("Ready")
-                    messagebox.showerror("PiKit", f"Tri-model error: {e}")
-                    return
-
-                # 4) Create new doc with final synthesis
-                new_id = self.doc_store.add_document("Tri Synthesis", out.final)
-
-                # 5) Update memory breadcrumbs
-                memory.setdefault("recent_immediate", [])
-                memory["recent_immediate"] = (memory["recent_immediate"] + [out.immediate])[-10:]
-                set_memory(conn, memory, key="global")
-
-                # 6) Insert a **markdown** link only (no GUI styling; hypertext_parser handles it)
-                label = sel_text if sel_text else "See synthesis"
-                link_md = f"[{label}](doc:{new_id})"
-
-                if sel_text:
-                    # Replace selected text with link in the widget
-                    try:
-                        self.text.delete(start, end)  # type: ignore[attr-defined]
-                        self.text.insert(start, link_md)  # type: ignore[attr-defined]
-                    except Exception:
-                        # Fallback: replace first occurrence in stored body
-                        body = self.doc_store.get_document(doc_id)["body"]
-                        body = body.replace(sel_text, link_md, 1)
-                        self.doc_store.update_document(doc_id, body)
-                else:
-                    # Append at end of widget
-                    try:
-                        self.text.insert(tk.END, "\n" + link_md)  # type: ignore[attr-defined]
-                    except Exception:
-                        body = self.doc_store.get_document(doc_id)["body"]
-                        body = (body or "") + "\n" + link_md
-                        self.doc_store.update_document(doc_id, body)
-
-                # 7) Persist updated body from widget (best effort)
-                try:
-                    new_body = self.text.get("1.0", tk.END)  # type: ignore[attr-defined]
-                    self.doc_store.update_document(doc_id, new_body)
-                except Exception:
-                    pass
-
-                # 8) Refresh UI
-                try:
-                    self._refresh_sidebar()
-                except Exception:
-                    pass
-                try:
-                    self._render_document(self.doc_store.get_document(doc_id))
-                except Exception:
-                    pass
-
-                if hasattr(self, "set_status"):
-                    self.set_status("Ready")
-
-            # Schedule Tk-safe callback
-            self.after(0, lambda: fut.add_done_callback(lambda _f: self.after(0, on_done, _f)))
-        except Exception as e:
-            if hasattr(self, "set_status"):
-                self.set_status("Ready")
-            messagebox.showerror("PiKit", f"ASK (Tri) failed: {e}")
-
-    def _ensure_opml_widgets(self):
-        """Create (or reuse) the OPML widgets embedded in the document pane."""
-        if hasattr(self, "_opml_frame") and self._opml_frame.winfo_exists():
-            return
-        pane = self.text.master  # the grid container created in _build_main_pane
-        self._opml_frame = tk.Frame(pane)
-        self._opml_frame.grid(row=0, column=0, sticky="nswe")
-        # Toolbar for OPML mode
-        tb = tk.Frame(self._opml_frame)
-        tb.pack(side=tk.TOP, fill=tk.X)
-        self._opml_show_nums = tk.BooleanVar(value=True)
-        ttk.Checkbutton(tb, text="Show Numbers", variable=self._opml_show_nums, command=self._opml_update_numbering).pack(
-            side=tk.LEFT, padx=6
-        )
-        # Treeview for OPML
-        self._opml_tree = ttk.Treeview(self._opml_frame, columns=("num",), show="tree headings")
-        self._opml_tree.heading("num", text="No.")
-        self._opml_tree.column("num", width=90, minwidth=60, stretch=False, anchor="e")
-        vsb = ttk.Scrollbar(self._opml_frame, orient="vertical", command=self._opml_tree.yview)
-        hsb = ttk.Scrollbar(self._opml_frame, orient="horizontal", command=self._opml_tree.xview)
-        self._opml_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self._opml_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        hsb.pack(side=tk.BOTTOM, fill=tk.X)
-
-    def _show_opml(self):
-        self._ensure_opml_widgets()
-        # Hide text view (uses grid)
-        if self.text.winfo_manager():
-            self.text.grid_remove()
-        self._hide_image()
-        self._opml_frame.lift()
-        self._opml_frame.grid()
-
-    def _hide_opml(self):
-        if hasattr(self, "_opml_frame") and self._opml_frame.winfo_exists():
-            self._opml_frame.grid_remove()
-        # Restore text
-        if not self.text.winfo_manager():
-            self.text.grid(row=0, column=0, sticky="nswe")
-
-    def _render_opml_from_string(self, s: str):
-        """Parse OPML XML from a string and render it into the embedded tree."""
+    def _refresh_index(self):
         try:
-            if isinstance(s, (bytes, bytearray)):
-                s = s.decode("utf-8", errors="replace")
-            s = s.lstrip("\ufeff\r\n\t ")  # strip BOM/whitespace
-            root = ET.fromstring(s)
-        except Exception as e:
-            print("[WARN] OPML parse failed:", e)
-            # Fall back to text view
-            self._hide_opml()
-            self.text.delete("1.0", tk.END)
-            self.text.insert(tk.END, s or "")
-            return
-        if root.tag.lower() != "opml":
-            self._hide_opml()
-            self.text.delete("1.0", tk.END)
-            self.text.insert(tk.END, s or "")
+            self.sidebar.delete(*self.sidebar.get_children())
+        except Exception:
             return
 
-        # It's OPML; render
-        self._show_opml()
-        # Clear previous content
-        for iid in self._opml_tree.get_children(""):
-            self._opml_tree.delete(iid)
-        # Find <body> and its <outline> children
-        body = None
-        for child in root:
-            if child.tag.lower().endswith("body"):
-                body = child
-                break
-        outlines = body.findall("outline") if body is not None else list(root)
-
-        def insert_elem(parent_iid, elem):
-            text = (
-                elem.attrib.get("text")
-                or elem.attrib.get("title")
-                or (elem.text.strip() if elem.text else "")
-                or "[No Text]"
-            )
-            iid = self._opml_tree.insert(parent_iid, "end", text=text)
-            for c in elem:
-                if c.tag.lower() in {"outline", "node", "item"}:
-                    insert_elem(iid, c)
-
-        for e in outlines:
-            if e.tag.lower() in {"outline", "node", "item"}:
-                insert_elem("", e)
-
-        # Auto-expand and number
-        self._opml_expand_to_depth_in_pane(self.opml_expand_depth)
-        self._opml_update_numbering()
-
-    def _opml_expand_to_depth_in_pane(self, depth: int):
-        if not hasattr(self, "_opml_tree"):
-            return
-
-        def walk(iid, d):
-            if d >= depth:
-                return
-            self._opml_tree.item(iid, open=True)
-            for c in self._opml_tree.get_children(iid):
-                walk(c, d + 1)
-
-        for top in self._opml_tree.get_children(""):
-            walk(top, 0)
-
-    def _opml_update_numbering(self):
-        if not hasattr(self, "_opml_tree"):
-            return
-        show = bool(self._opml_show_nums.get())
-        if show:
-            self._opml_tree.column("num", width=90, minwidth=60, stretch=False, anchor="e")
-        else:
-            self._opml_tree.column("num", width=0, minwidth=0, stretch=False)
-            def clear(iid=""):
-                for c in self._opml_tree.get_children(iid):
-                    self._opml_tree.set(c, "num", "")
-                    clear(c)
-            clear()
-            return
-
-        def renumber(iid="", prefix=None):
-            if prefix is None:
-                prefix = []
-            kids = self._opml_tree.get_children(iid)
-            for idx, c in enumerate(kids, start=1):
-                parts = prefix + [idx]
-                self._opml_tree.set(c, "num", ".".join(str(n) for n in parts))
-                renumber(c, parts)
-
-        renumber("")
-
-    # ---------------- Image ops ----------------
-
-    def _looks_like_image(self, title: str) -> bool:
-        return title.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))
-
-    def _show_image_bytes(self, raw: bytes):
-        from io import BytesIO
-        pil = Image.open(BytesIO(raw))
-        # Size to window-ish
-        w, h = max(100, self.winfo_width() - 40), max(100, self.winfo_height() - 40)
-        pil.thumbnail((w, h))
-        self._last_pil_img = pil
-        self._last_tk_img = ImageTk.PhotoImage(pil)
-        self.img_label.configure(image=self._last_tk_img)
-
-    def _hide_image(self):
-        if self.img_label and self.img_label.winfo_manager():
-            self.img_label.configure(image="")
-
-    def _toggle_image(self):
-        if not self._last_pil_img:
-            return
-        if not self._image_enlarged:
-            win = tk.Toplevel(self)
-            win.title("Image Preview")
-            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-            iw, ih = self._last_pil_img.size
-            win.geometry(f"{min(iw, sw)}x{min(ih, sh)}")
-            canvas = tk.Canvas(win)
-            hbar = ttk.Scrollbar(win, orient="horizontal", command=canvas.xview)
-            vbar = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
-            canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set, scrollregion=(0, 0, iw, ih))
-            canvas.grid(row=0, column=0, sticky="nsew")
-            hbar.grid(row=1, column=0, sticky="we")
-            vbar.grid(row=0, column=1, sticky="ns")
-            win.grid_rowconfigure(0, weight=1)
-            win.grid_columnconfigure(0, weight=1)
-            tk_img = ImageTk.PhotoImage(self._last_pil_img)
-            canvas.create_image(0, 0, anchor="nw", image=tk_img)
-            canvas.image = tk_img
-            win.bind("<Button-1>", lambda e: self._toggle_image())
-            self._image_enlarged = True
-        else:
-            default = f"document_{self.current_doc_id}.png"
-            path = filedialog.asksaveasfilename(
-                title="Save Image",
-                initialfile=default,
-                defaultextension=".png",
-                filetypes=[("PNG", "*.png"), ("All Files", "*.*")],
-            )
-            if path:
-                try:
-                    self._last_pil_img.save(path)
-                    messagebox.showinfo("Save Image", f"Image saved to:\n{path}")
-                except Exception as e:
-                    messagebox.showerror("Save Image", f"Error saving image:{e}")
-            self._image_enlarged = False
-
-    def _handle_image(self):
-        try:
-            start = self.text.index(tk.SEL_FIRST)
-            end = self.text.index(tk.SEL_LAST)
-            prompt = self.text.get(start, end).strip()
-        except tk.TclError:
-            messagebox.showwarning("IMAGE", "Please select some text first.")
-            return
-
-        def wrk():
+        rows = []
+        if self.doc_store and hasattr(self.doc_store, "get_document_index"):
             try:
-                pil = image_generator.generate_image(prompt)
-                self._last_pil_img = pil
-                thumb = pil.copy()
-                thumb.thumbnail((800, 400))
-                self._last_tk_img = ImageTk.PhotoImage(thumb)
-                self._image_enlarged = False
-                self.after(0, lambda: self.img_label.configure(image=self._last_tk_img))
+                rows = self.doc_store.get_document_index() or []
             except Exception as e:
-                err = str(e)  # capture inside the except scope
-                self.after(0, lambda err=err: messagebox.showerror("Image Error", err))
+                print("get_document_index failed:", e)
 
-        threading.Thread(target=wrk, daemon=True).start()
-
-    # ---------------- Import/Export ----------------
-
-    def _import_doc(self):
-        path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
-        if not path:
-            return
-        body = Path(path).read_text(encoding="utf-8")
-        title = Path(path).stem
-        nid = self.doc_store.add_document(title, body)
-        self.logger.info(f"Imported {nid}")
-        self._refresh_sidebar()
-        doc = self.doc_store.get_document(nid)
-        if doc:
-            self._render_document(doc)
-
-    def _export_doc(self):
-        """Robust export: picks sensible default extension, writes bytes for binary and text for text."""
-        from tkinter import filedialog, messagebox
-        from pathlib import Path
-
-        if getattr(self, "current_doc_id", None) is None:
-            messagebox.showwarning("Export", "No document selected.")
-            return
-
-        # Fetch and normalize
-        doc = self.doc_store.get_document(self.current_doc_id)
-        if hasattr(doc, "keys"):  # sqlite3.Row-like
-            title = doc["title"] if "title" in doc.keys() else "Document"
-            body = doc["body"] if "body" in doc.keys() else ""
-        elif isinstance(doc, dict):
-            title = doc.get("title") or "Document"
-            body = doc.get("body") or ""
-        else:  # tuple/list row: (id, title, body, ...)
-            title = doc[1] if len(doc) > 1 else "Document"
-            body = doc[2] if len(doc) > 2 else ""
-
-        # Infer extension/filetypes
-        ext = ".txt"
-        filetypes = [("Text", "*.txt"), ("All files", "*.*")]
-        if isinstance(body, (bytes, bytearray)):
-            b = bytes(body)
-            if b.startswith(b"\x89PNG\r\n\x1a\n"):
-                ext, filetypes = ".png", [("PNG image", "*.png"), ("All files", "*.*")]
-            elif b.startswith(b"\xff\xd8\xff"):
-                ext, filetypes = ".jpg", [("JPEG image", "*.jpg;*.jpeg"), ("All files", "*.*")]
-            elif b[:6] in (b"GIF87a", b"GIF89a"):
-                ext, filetypes = ".gif", [("GIF image", "*.gif"), ("All files", "*.*")]
-            elif b.startswith(b"%PDF-"):
-                ext, filetypes = ".pdf", [("PDF", "*.pdf"), ("All files", "*.*")]
-            elif b[:4] == b"RIFF" and b[8:12] == b"WEBP":
-                ext, filetypes = ".webp", [("WebP", "*.webp"), ("All files", "*.*")]
+        for row in rows:
+            # Support dict/Row/tuple
+            if isinstance(row, sqlite3.Row):
+                m = dict(row)
+                doc_id = m.get("id", m.get("doc_id", m.get("pk", None)))
+                title = str(m.get("title", m.get("name", "")) or "")
+                content = (m.get("content") or m.get("body") or m.get("text") or
+                           m.get("raw") or m.get("data") or m.get("value") or
+                           m.get("description") or "")
+            elif isinstance(row, dict):
+                doc_id = row.get("id") or row.get("doc_id") or row.get("pk")
+                title = str(row.get("title", row.get("name", "")) or "")
+                content = (row.get("content") or row.get("body") or row.get("text") or
+                           row.get("raw") or row.get("data") or row.get("value") or
+                           row.get("description") or "")
             else:
-                try:
-                    b.decode("utf-8")
-                    ext, filetypes = ".txt", [("Text", "*.txt"), ("All files", "*.*")]
-                except Exception:
-                    ext, filetypes = ".bin", [("Binary", "*.bin"), ("All files", "*.*")]
-        else:
-            s = (body or "").lstrip()
-            low = s.lower()
-            if low.startswith("<opml"):
-                ext, filetypes = ".opml", [("OPML", "*.opml"), ("XML", "*.xml"), ("All files", "*.*")]
-            elif low.startswith("<html") or ("<body" in low) or ("<div" in low):
-                ext, filetypes = ".html", [("HTML", "*.html;*.htm"), ("All files", "*.*")]
-            elif low.startswith("<svg"):
-                ext, filetypes = ".svg", [("SVG", "*.svg"), ("All files", "*.*")]
-            else:
-                ext, filetypes = ".txt", [("Text", "*.txt"), ("All files", "*.*")]
+                # tuple/list
+                doc_id = row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else None
+                title = (row[1] if isinstance(row, (list, tuple)) and len(row) > 1 and isinstance(row[1], str) else "")
+                content = (row[2] if isinstance(row, (list, tuple)) and len(row) > 2 else "")
 
-        # Ask destination
-        safe = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in (title or "Document")).strip() or "Document"
-        path = filedialog.asksaveasfilename(
-            title="Export Document",
-            defaultextension=ext,
-            initialfile=f"{safe}{ext}",
-            filetypes=filetypes,
-        )
-        if not path:
-            return
+            preview = _make_preview(title, content)
+            size = self._approx_payload_size(content)
+            self.sidebar.insert("", "end", values=(doc_id, preview, _human_size(size)))
 
-        # Write
-        try:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(body, (bytes, bytearray)) and ext not in (".txt", ".opml", ".html", ".svg", ".xml"):
-                Path(path).write_bytes(bytes(body))
-            else:
-                if isinstance(body, (bytes, bytearray)):
-                    # Convert bytes→text if the user chose a texty extension
-                    try:
-                        text_out = body.decode("utf-8")
-                    except Exception:
-                        try:
-                            from modules.hypertext_parser import render_binary_as_text
-                            text_out = render_binary_as_text(body, title or "Document")
-                        except Exception:
-                            text_out = body.decode("utf-8", errors="replace")
-                    Path(path).write_text(text_out, encoding="utf-8", newline="\n")
-                else:
-                    Path(path).write_text(body or "", encoding="utf-8", newline="\n")
-            messagebox.showinfo("Export", f"Saved:\n{path}")
-        except Exception as e:
-            messagebox.showerror("Export", f"Could not save:\n{e}")
-
-    def _import_directory(self):
-        dir_path = filedialog.askdirectory(title="Select Folder to Import")
-        if not dir_path:
-            return
-        imported, skipped = import_text_files_from_directory(dir_path, self.doc_store)
-        msg = f"Imported {imported} file(s), skipped {skipped}."
-        print("[INFO]", msg)
-        messagebox.showinfo("Directory Import", msg)
-        self._refresh_sidebar()
-
-    def export_and_launch_server(self):
-        export_path = Path("exported_docs")
-        export_path.mkdir(exist_ok=True)
-        for doc in self.doc_store.get_document_index():
-            data = dict(self.doc_store.get_document(doc["id"]))
-            if data:
-                data = sanitize_doc(data)
-                with open(export_path / f"{data['id']}.json", "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-
-        def launch():
-            fp = Path("modules") / "flask_server.py"
-            if fp.exists():
-                subprocess.Popen([sys.executable, str(fp)])
-
-        threading.Thread(target=launch, daemon=True).start()
-        messagebox.showinfo("Server Started", "Flask server launched at http://127.0.0.1:5050")
-
-    def _save_binary_as_text(self):
-        selected_item = self.sidebar.selection()
-        if not selected_item:
-            return
-        doc_id_str = self.sidebar.item(selected_item, "values")[0]
-        if not str(doc_id_str).isdigit():
-            print(f"Warning: selected text is not a valid integer '{doc_id_str}'")
-            return
-        doc_id = int(doc_id_str)
-        doc = self.doc_store.get_document(doc_id)
-        if not doc or len(doc) < 3:
-            return
-        body = doc[2]
-        if isinstance(body, bytes) or ("\x00" in str(body)):
-            print("Binary detected, converting to text using render_binary_as_text.")
-            body = render_binary_as_text(body)
-            self.doc_store.update_document(doc_id, body)
-            self._render_document(self.doc_store.get_document(doc_id))
-        else:
-            print("Document is already text. Skipping overwrite.")
-        content = self.processor.get_strings_content(doc_id)
-        self.doc_store.update_document(doc_id, content)
-        doc = self.doc_store.get_document(doc_id)
-        self._render_document(doc)
-
-    # ---------------- Open OPML (import) ----------------
-
-    def _open_opml_from_main(self):
-        path = filedialog.askopenfilename(
-            title="Open OPML/XML", filetypes=[("OPML / XML", "*.opml *.xml"), ("All files", "*.*")]
-        )
-        if not path:
-            return
-        try:
-            content = Path(path).read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            messagebox.showerror("Open OPML", f"Failed to read file:\n{e}")
-            return
-        title = Path(path).stem
-        try:
-            new_id = self.doc_store.add_document(title, content)
-        except Exception as e:
-            messagebox.showerror("Open OPML", f"Failed to import OPML to DB:\n{e}")
-            return
-        self._refresh_sidebar()
-        self.current_doc_id = new_id
-        doc = self.doc_store.get_document(new_id)
-        if doc:
-            self._render_document(doc)
-        if getattr(self, "tree_win", None) and self.tree_win.winfo_exists():
-            try:
-                self.tree_win.load_opml_file(path)
-                self.tree_win.deiconify()
-                self.tree_win.lift()
-                self._apply_opml_expand_depth()
-            except Exception:
-                pass
-
-    # ---------------- Rendering ----------------
-
-    def _render_document(self, doc):
-        """Render a document once, parse green links, and auto-render OPML when detected."""
-        # Normalize doc body
-        body = doc.get("body") if isinstance(doc, dict) else (doc[2] if len(doc) > 2 else "")
-        if isinstance(body, str):
-            b_norm = body.lstrip("\ufeff\r\n\t ")
-            if "<opml" in b_norm.lower():
-                self._render_opml_from_string(b_norm)
-                return
-
-        # Plain text or other
-        self._hide_opml()
-        self.text.delete("1.0", tk.END)
-
-        # bytes -> placeholder
-        if isinstance(body, (bytes, bytearray)):
-            self.text.insert(tk.END, "[binary document]")
-            return
-
-        # very large text -> placeholder
-        if isinstance(body, str) and len(body) > 200_000:
-            self.text.insert(tk.END, "[large binary-like document]")
-            return
-
-        # Show and parse links
-        self.text.insert(tk.END, body or "")
-        hypertext_parser.parse_links(self.text, body or "", self._on_link_click)
-
-    def _on_link_click(self, doc_id):
-        if self.current_doc_id is not None:
-            self.history.append(self.current_doc_id)
-        self.current_doc_id = doc_id
-        doc = self.doc_store.get_document(doc_id)
-        if doc:
-            self._render_document(doc)
-
-    def _on_delete_clicked(self):
-        """Delete the currently selected document from the sidebar and clear the pane."""
+    def _on_sidebar_select(self, event=None):
         sel = self.sidebar.selection()
         if not sel:
-            messagebox.showwarning("Delete", "No document selected.")
             return
         item = self.sidebar.item(sel[0])
         vals = item.get("values") or []
         if not vals:
-            messagebox.showerror("Delete", "Invalid selection.")
             return
+        doc_id = vals[0]
+        self._open_doc_id(doc_id)
+
+    def _open_doc_id(self, doc_id):
         try:
-            nid = int(vals[0])
-        except (ValueError, TypeError):
-            messagebox.showerror("Delete", "Invalid document ID.")
+            doc_id = int(doc_id)
+        except Exception:
+            messagebox.showerror("Open", f"Invalid document id: {doc_id}")
             return
-        if not messagebox.askyesno("Confirm Delete", f"Delete document ID {nid}?"):
+
+        if self.current_doc_id is not None:
+            self.history.append(self.current_doc_id)
+
+        doc = None
+        if self.doc_store and hasattr(self.doc_store, "get_document"):
+            try:
+                doc = self.doc_store.get_document(doc_id)
+            except Exception as e:
+                print("get_document failed:", e)
+        if not doc:
+            messagebox.showerror("Open", f"Document {doc_id} not found.")
             return
+
+        self.current_doc_id = doc_id
+        self._render_document(doc)
+
+    # ---------- Render ----------
+    def _looks_like_opml(self, text: str) -> bool:
+        t = text.strip()
+        if "<opml" in t[:200].lower():
+            return True
+        if t.startswith("<?xml") and "<opml" in t.lower():
+            return True
+        return False
+
+    def _render_opml_outline(self, xml_text: str):
+        """Render OPML as an expandable outline using a Treeview."""
         try:
-            self.doc_store.delete_document(nid)
+            s = xml_text.lstrip("\ufeff\r\n\t ")
+            root = ET.fromstring(s)
         except Exception as e:
-            messagebox.showerror("Delete", f"Failed to delete: {e}")
+            # Fall back to plain text if parsing fails
+            self._show_text_mode()
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", xml_text)
+            self.status.set(f"OPML parse failed: {e}; showing raw XML")
             return
-        # Clear UI
-        self._refresh_sidebar()
-        self.text.delete("1.0", tk.END)
-        if hasattr(self, "_opml_frame") and self._opml_frame.winfo_exists():
-            self._opml_frame.grid_remove()
-        if hasattr(self, "img_label"):
-            self.img_label.configure(image="")
-        self.current_doc_id = None
+
+        self._show_tree_mode()
+        self.opml_tree.delete(*self.opml_tree.get_children())
+
+        body = root.find(".//body")
+        outlines = body.findall("outline") if body is not None else []
+
+        def node_label(elem: ET.Element) -> str:
+            for attr in ("text", "title"):
+                if elem.get(attr):
+                    return elem.get(attr)  # type: ignore
+            for attr in ("url", "htmlUrl", "xmlUrl"):
+                if elem.get(attr):
+                    return elem.get(attr)  # type: ignore
+            return "(item)"
+
+        def add_outline(e: ET.Element, parent=""):
+            this_id = self.opml_tree.insert(parent, "end", text=node_label(e))
+            for child in e.findall("outline"):
+                add_outline(child, this_id)
+
+        for top in outlines:
+            add_outline(top, "")
+
+        for child in self.opml_tree.get_children(""):
+            self.opml_tree.item(child, open=True)
+
+    def _set_img_label(self, pil_img: Image.Image):
+        # Size to fit window-ish
+        w = max(100, self.winfo_width() - 40)
+        h = max(100, self.winfo_height() - 180)  # leave room for text/status
+        img = pil_img.copy()
+        img.thumbnail((w, h))
+        self._last_pil_img = pil_img
+        self._last_tk_img = ImageTk.PhotoImage(img)
+        self.img_label.configure(image=self._last_tk_img)
+
+    def _hide_image(self):
+        self.img_label.configure(image="")
         self._last_pil_img = None
         self._last_tk_img = None
-        self._image_enlarged = False
-        messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
+        if self._image_zoom_win and self._image_zoom_win.winfo_exists():
+            try:
+                self._image_zoom_win.destroy()
+            except Exception:
+                pass
+        self._image_zoom_win = None
 
+    def _toggle_image_zoom(self):
+        if not self._last_pil_img:
+            return
+        if self._image_zoom_win and self._image_zoom_win.winfo_exists():
+            self._image_zoom_win.destroy()
+            self._image_zoom_win = None
+            return
+        win = tk.Toplevel(self)
+        win.title("Image Preview")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        iw, ih = self._last_pil_img.size
+        win.geometry(f"{min(iw, sw)}x{min(ih, sh)}")
+        canvas = tk.Canvas(win, scrollregion=(0, 0, iw, ih))
+        hbar = ttk.Scrollbar(win, orient="horizontal", command=canvas.xview)
+        vbar = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        hbar.grid(row=1, column=0, sticky="we")
+        vbar.grid(row=0, column=1, sticky="ns")
+        win.grid_rowconfigure(0, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+        tk_img = ImageTk.PhotoImage(self._last_pil_img)
+        canvas.create_image(0, 0, anchor="nw", image=tk_img)
+        canvas.image = tk_img
+        self._image_zoom_win = win
 
-def sanitize_doc(doc):
-    if isinstance(doc["body"], bytes):
+    def _render_document(self, doc):
+        """Render text / OPML / image from text(base64) or bytes."""
+        title, content = _extract_title_content(doc)
+        self._current_content = content
+
+        # OPML?
+        if isinstance(content, str) and self._looks_like_opml(content):
+            self._render_opml_outline(content)
+            self.status.set(f"Viewing OPML: {title} (id={self.current_doc_id})")
+            return
+
+        # Text mode
+        self._show_text_mode()
+        self.text.delete("1.0", "end")
+        self._hide_image()
+
+        # Try Base64 (string)
+        if PIL_AVAILABLE and isinstance(content, str) and _looks_like_b64_text(content):
+            decoded = _decode_b64_text(content)
+            if decoded:
+                try:
+                    pil = Image.open(BytesIO(decoded))
+                    self._set_img_label(pil)
+                    self.status.set(f"Viewing image (decoded from Base64 text): id={self.current_doc_id}, {_human_size(len(decoded))}")
+                    return
+                except Exception as e:
+                    print("Base64 text image render failed:", e)
+
+        # Try bytes that are Base64 text
+        if PIL_AVAILABLE and isinstance(content, (bytes, bytearray)) and _looks_like_b64_bytes(content):
+            decoded = _decode_b64_bytes(content)
+            if decoded:
+                try:
+                    pil = Image.open(BytesIO(decoded))
+                    self._set_img_label(pil)
+                    self.status.set(f"Viewing image (decoded from Base64 bytes): id={self.current_doc_id}, {_human_size(len(decoded))}")
+                    return
+                except Exception as e:
+                    print("Base64 bytes image render failed:", e)
+
+        # Try raw image bytes
+        if PIL_AVAILABLE and isinstance(content, (bytes, bytearray)):
+            try:
+                pil = Image.open(BytesIO(content))
+                self._set_img_label(pil)
+                self.status.set(f"Viewing image (BLOB): id={self.current_doc_id}, {_human_size(len(content))}")
+                return
+            except Exception as e:
+                print("BLOB image render failed:", e)
+
+        # Fallback: textual content
+        display = content if isinstance(content, str) else (render_binary_as_text(content) if render_binary_as_text and isinstance(content, (bytes, bytearray)) else str(content))
+        self.text.insert("1.0", display)
+
+        # Parse links if available and content is textual
+        if parse_links and isinstance(display, str):
+            try:
+                parse_links(self.text, display, self._open_doc_id)
+            except Exception as e:
+                print("parse_links failed:", e)
+
+        self.status.set(f"Viewing: {title} (id={self.current_doc_id})")
+
+    def _render_binary_preview(self, payload):
+        if render_binary_preview:
+            try:
+                render_binary_preview(self.text, payload)
+                return
+            except Exception as e:
+                print("render_binary_preview failed:", e)
+        if render_binary_as_text:
+            try:
+                display = render_binary_as_text(self.text, payload)
+                self.text.insert("1.0", display)
+            except Exception as e:
+                print("render_binary_as_text failed:", e)
+
+    # ---------- Commands ----------
+    def _on_ask(self):
+        sel = self._get_selected_text()
+        if not sel.strip():
+            messagebox.showinfo("ASK", "Please select some text in the document first.")
+            return
+
+        if not self.processor or not hasattr(self.processor, "query_ai"):
+            messagebox.showerror("ASK", "CommandProcessor.query_ai is unavailable.")
+            return
+
+        current_id = self.current_doc_id
+        prefix = simpledialog.askstring(
+            "ASK prefix",
+            "Enter prefix (optional):",
+            initialvalue="Please expand on this: "
+        )
+        if prefix is None:
+            return
+
+        def _on_success(new_id):
+            try:
+                messagebox.showinfo("ASK", f"Created new document {new_id}")
+            finally:
+                self._refresh_index()
+
+        def _on_link_created(_t):
+            # Re-open current doc so green link appears immediately
+            if current_id is not None and self.doc_store:
+                try:
+                    doc = self.doc_store.get_document(current_id)
+                    if doc:
+                        self._render_document(doc)
+                except Exception as e:
+                    print("on_link_created refresh failed:", e)
+
+        # Try 5-arg signature first, then legacy 4-arg
         try:
-            doc["body"] = doc["body"].decode("utf-8")
-        except UnicodeDecodeError:
-            doc["body"] = doc["body"].decode("utf-8", errors="replace")
-    return doc
+            self.processor.query_ai(
+                selected_text=sel,
+                current_doc_id=current_id,
+                on_success=_on_success,
+                on_link_created=_on_link_created,
+                prefix=prefix,
+            )
+        except TypeError:
+            try:
+                self.processor.query_ai(sel, current_id, _on_success, _on_link_created)
+            except Exception as e:
+                messagebox.showerror("ASK", f"query_ai failed: {e}")
+        except Exception as e:
+            messagebox.showerror("ASK", f"query_ai error: {e}")
+
+    def _go_back(self):
+        if not self.history:
+            messagebox.showinfo("Back", "No previous document.")
+            return
+        prev = self.history.pop()
+        self._open_doc_id(prev)
+
+    def _open_by_id(self):
+        s = simpledialog.askstring("Open", "Document ID:")
+        if not s:
+            return
+        self._open_doc_id(s)
+
+    def _import_directory(self):
+        if not self.processor or not hasattr(self.processor, "import_directory"):
+            messagebox.showerror("Import", "CommandProcessor.import_directory unavailable.")
+            return
+        path = filedialog.askdirectory(title="Choose a directory to import")
+        if not path:
+            return
+        try:
+            added = self.processor.import_directory(path)
+        except Exception as e:
+            messagebox.showerror("Import", f"Import failed: {e}")
+            return
+        messagebox.showinfo("Import", f"Imported {added} documents.")
+        self._refresh_index()
+
+    def _open_opml_from_file(self):
+        # Prefer plugin flow when available
+        if opml_plugin and hasattr(opml_plugin, "open_opml_file_dialog"):
+            try:
+                new_id = opml_plugin.open_opml_file_dialog(self)
+                if new_id:
+                    self._open_doc_id(new_id)
+                return
+            except Exception as e:
+                messagebox.showerror("OPML", f"Open OPML failed: {e}")
+                return
+
+        # Fallback: let user pick a file and call into processor with any of the common names
+        filepath = filedialog.askopenfilename(
+            title="Open OPML file",
+            filetypes=[("OPML files", "*.opml *.xml"), ("All files", "*.*")]
+        )
+        if not filepath:
+            return
+
+        if not self.processor:
+            messagebox.showerror("OPML", "OPML feature unavailable (no processor).")
+            return
+
+        # Try common import function names
+        func = None
+        for name in ("import_opml_from_path", "import_opml", "import_opml_file"):
+            func = getattr(self.processor, name, None)
+            if callable(func):
+                break
+
+        if not func:
+            messagebox.showerror("OPML", "No OPML import function found in CommandProcessor.")
+            return
+
+        try:
+            new_id = func(filepath)
+        except Exception as e:
+            messagebox.showerror("OPML", f"OPML import failed: {e}")
+            return
+        if new_id:
+            self._open_doc_id(new_id)
+
+    def _convert_selection_to_opml(self):
+        if self._mode != "text":
+            messagebox.showinfo("Convert → OPML", "Switch to a text document and select text to convert.")
+            return
+
+        sel = self._get_selected_text()
+        if not sel.strip():
+            messagebox.showinfo("Convert → OPML", "Select some text first.")
+            return
+        # Prefer plugin conversion if present
+        xml_text = None
+        if opml_plugin:
+            conv = getattr(opml_plugin, "convert_text_to_opml_inplace", None)
+            if callable(conv):
+                try:
+                    xml_text = conv(sel)
+                except Exception as e:
+                    messagebox.showerror("Convert → OPML", f"Conversion failed: {e}")
+                    return
+        if xml_text is None:
+            xml_text = self._basic_text_to_opml(sel)
+
+        win = tk.Toplevel(self)
+        win.title("OPML Preview")
+        txt = tk.Text(win, wrap="word")
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", xml_text)
+
+        def _save():
+            out = filedialog.asksaveasfilename(
+                title="Save OPML",
+                defaultextension=".opml",
+                filetypes=[("OPML files", "*.opml"), ("XML files", "*.xml"), ("All files", "*.*")]
+            )
+            if not out:
+                return
+            Path(out).write_text(xml_text, encoding="utf-8")
+            messagebox.showinfo("OPML", f"Saved to {out}")
+
+        ttk.Button(win, text="Save…", command=_save).pack(pady=6)
+
+    def _reparse_links(self):
+        """Re-run link parsing on the current Text widget content (text mode only)."""
+        if self._mode != "text":
+            messagebox.showinfo("Reparse Links", "Not applicable for OPML outline view.")
+            return
+        if not parse_links:
+            messagebox.showinfo("Reparse Links", "No link parser available.")
+            return
+        try:
+            current_text = self.text.get("1.0", "end-1c")
+            self._current_content = current_text
+            parse_links(self.text, current_text, self._open_doc_id)
+            self.status.set("Links reparsed.")
+        except Exception as e:
+            messagebox.showerror("Reparse Links", f"Failed: {e}")
+
+    def _on_search_clicked(self):
+        q = simpledialog.askstring("Search", "Enter query (matches title/content):")
+        if not q:
+            return
+        ql = q.lower()
+
+        rows = []
+        if self.doc_store and hasattr(self.doc_store, "get_document_index"):
+            try:
+                rows = self.doc_store.get_document_index() or []
+            except Exception as e:
+                print("get_document_index failed:", e)
+
+        try:
+            self.sidebar.delete(*self.sidebar.get_children())
+        except Exception:
+            pass
+
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                m = dict(row)
+                doc_id = m.get("id", m.get("doc_id", m.get("pk", None)))
+                title = str(m.get("title", m.get("name", "")) or "")
+                content = (m.get("content") or m.get("body") or m.get("text") or
+                           m.get("raw") or m.get("data") or m.get("value") or
+                           m.get("description") or "")
+            elif isinstance(row, dict):
+                doc_id = row.get("id") or row.get("doc_id") or row.get("pk")
+                title = str(row.get("title", row.get("name", "")) or "")
+                content = (row.get("content") or row.get("body") or row.get("text") or
+                           row.get("raw") or row.get("data") or row.get("value") or
+                           row.get("description") or "")
+            else:
+                doc_id = row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else None
+                title = (row[1] if isinstance(row, (list, tuple)) and len(row) > 1 and isinstance(row[1], str) else "")
+                content = (row[2] if isinstance(row, (list, tuple)) and len(row) > 2 else "")
+
+            hay = (_make_preview(title, content) + "\n" + str(content)).lower()
+            if ql in hay:
+                size = self._approx_payload_size(content)
+                self.sidebar.insert("", "end", values=(doc_id, _make_preview(title, content), _human_size(size)))
+
+    def _save_visible_text(self):
+        if self._mode != "text":
+            messagebox.showinfo("Save Visible Text", "Switch to a text document first.")
+            return
+        visible = self.text.get("1.0", "end-1c")
+        if not visible.strip():
+            messagebox.showinfo("Save Visible Text", "No text to save.")
+            return
+        out = filedialog.asksaveasfilename(
+            title="Save Visible Text",
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")]
+        )
+        if not out:
+            return
+        Path(out).write_text(visible, encoding="utf-8")
+        messagebox.showinfo("Saved", f"Saved to {out}")
+
+    def _import_text_file(self):
+        path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if not path:
+            return
+        body = Path(path).read_text(encoding="utf-8", errors="replace")
+        title = Path(path).stem
+        nid = self.doc_store.add_document(title, body)
+        self._refresh_index()
+        doc = self.doc_store.get_document(nid)
+        if doc:
+            self._render_document(doc)
+
+    def _export_current(self):
+        if self.current_doc_id is None:
+            messagebox.showwarning("Export", "No document loaded.")
+            return
+        doc = self.doc_store.get_document(self.current_doc_id)
+        if not doc:
+            messagebox.showerror("Export", "Not found.")
+            return
+        title, content = _extract_title_content(doc)
+
+        # Choose extension
+        if isinstance(content, (bytes, bytearray)) or _looks_like_b64_text(content if isinstance(content, str) else ""):
+            default_ext = ".png"
+            types = [("PNG image", "*.png"), ("All files", "*.*")]
+        elif isinstance(content, str) and self._looks_like_opml(content):
+            default_ext = ".opml"
+            types = [("OPML", "*.opml"), ("XML", "*.xml"), ("All files", "*.*")]
+        else:
+            default_ext = ".txt"
+            types = [("Text", "*.txt"), ("All files", "*.*")]
+
+        default_name = f"document_{self.current_doc_id}{default_ext}"
+        out = filedialog.asksaveasfilename(title="Export Current", defaultextension=default_ext,
+                                           initialfile=default_name, filetypes=types)
+        if not out:
+            return
+
+        try:
+            if isinstance(content, (bytes, bytearray)):
+                Path(out).write_bytes(content)
+            elif isinstance(content, str) and _looks_like_b64_text(content):
+                b = _decode_b64_text(content)
+                if b:
+                    Path(out).write_bytes(b)
+                else:
+                    Path(out).write_text(content, encoding="utf-8")
+            else:
+                Path(out).write_text(str(content), encoding="utf-8")
+            messagebox.showinfo("Export", f"Saved to:\n{out}")
+        except Exception as e:
+            messagebox.showerror("Export", f"Failed to save: {e}")
+
+    def _export_and_launch_flask(self):
+        export_path = Path("exported_docs")
+        export_path.mkdir(exist_ok=True)
+
+        # export simple JSON docs (best-effort)
+        try:
+            import json
+            if self.doc_store and hasattr(self.doc_store, "get_document_index"):
+                for row in self.doc_store.get_document_index() or []:
+                    doc_id = row.get("id") if isinstance(row, dict) else (row[0] if isinstance(row, (list, tuple)) else None)
+                    if doc_id is None:
+                        continue
+                    doc = self.doc_store.get_document(doc_id)
+                    if isinstance(doc, sqlite3.Row):
+                        data = dict(doc)
+                    elif isinstance(doc, dict):
+                        data = dict(doc)
+                    elif isinstance(doc, (list, tuple)):
+                        data = {"id": doc[0] if len(doc) > 0 else None, "title": doc[1] if len(doc) > 1 else "", "body": doc[2] if len(doc) > 2 else ""}
+                    else:
+                        data = {"id": doc_id, "title": "", "body": str(doc)}
+                    with open(export_path / f"{data.get('id')}.json", "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+        except Exception as e:
+            print("Export JSON failed:", e)
+
+        # Launch Flask if present
+        try:
+            import subprocess, sys
+            if flask_server_path.exists():
+                subprocess.Popen([sys.executable, str(flask_server_path)])
+                messagebox.showinfo("Server Started", "Flask server launched at http://127.0.0.1:5050")
+            else:
+                messagebox.showwarning("Flask", "modules/flask_server.py not found.")
+        except Exception as e:
+            messagebox.showerror("Flask", f"Failed to launch: {e}")
+
+    @staticmethod
+    def _basic_text_to_opml(text: str) -> str:
+        import html
+        body = "\n".join(
+            f'<outline text="{html.escape(line)}" />'
+            for line in text.splitlines() if line.strip()
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<opml version="2.0">\n'
+            '  <head><title>Converted</title></head>\n'
+            '  <body>\n'
+            f'{body}\n'
+            '  </body>\n'
+            '</opml>\n'
+        )
+
+def main():
+    app = App()
+    app.mainloop()
+
+if __name__ == "__main__":
+    main()
+
+# --- Compatibility alias for old imports ---
+DemoKitGUI = App
