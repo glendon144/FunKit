@@ -13,9 +13,10 @@ from modules.ai_memory import get_memory, set_memory
 from modules.text_sanitizer import sanitize_ai_reply
 
 # ------------ Config (env-tunable) ------------
-SHORT_THRESHOLD_TOKENS = int(os.getenv("PIKIT_SHORT_THRESHOLD_TOKENS", "200"))
-SHORT_MAX_TOKENS       = int(os.getenv("PIKIT_SHORT_MAX_TOKENS", "220"))   # quick replies
-LONG_MAX_TOKENS        = int(os.getenv("PIKIT_LONG_MAX_TOKENS", "900"))    # detailed replies
+VERBOSITY_MODE = os.getenv("PIKIT_VERBOSITY_MODE", "long").lower()
+SHORT_THRESHOLD_TOKENS = int(os.getenv("PIKIT_SHORT_THRESHOLD_TOKENS", "0"))
+SHORT_MAX_TOKENS       = int(os.getenv("PIKIT_SHORT_MAX_TOKENS", "800"))   # quick replies
+LONG_MAX_TOKENS        = int(os.getenv("PIKIT_LONG_MAX_TOKENS", "2000"))    # detailed replies
 # If you simply want to "double tokens", bump LONG_MAX_TOKENS and/or SHORT_MAX_TOKENS above.
 # Timeout was already made env-configurable in ai_interface/local_ai_interface earlier.
 
@@ -145,8 +146,8 @@ class CommandProcessor:
         """Return (max_tokens, steering_instructions) based on input size."""
         n = _approx_tokens(prompt_text)
         if n < SHORT_THRESHOLD_TOKENS:
-            steer = "Output: be concise —  ≤6 sentences."
-            return SHORT_MAX_TOKENS, steer
+            steer = "Output: clear and complete."
+            return LONG_MAX_TOKENS, steer
         else:
             steer = "Output: thorough and structured; use short sections and examples where useful."
             return LONG_MAX_TOKENS, steer
@@ -155,7 +156,7 @@ class CommandProcessor:
         """Try to send max_tokens to the AI interface if supported; otherwise return prompt only."""
         # Many of your local interfaces accept overrides= dict
         try:
-            return {"overrides": {"max_tokens": max_tokens}}
+            return {"max_tokens": max_tokens,"overrides": {"max_tokens": max_tokens}}
         except Exception:
             return {}
 

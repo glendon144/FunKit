@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover
 def _import_engine():
     import importlib
     # Standardize on lowercase module in the package
-    return importlib.import_module("modules.aopmlengine")
+    return importlib.import_module("modules.aopml_engine")  # Deepseek modified version has _ 
 
 def _convert_payload_to_opml(title: str, payload) -> str:
     """
