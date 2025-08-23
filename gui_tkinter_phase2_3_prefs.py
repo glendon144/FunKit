@@ -20,13 +20,13 @@ from modules.TreeView import open_tree_view
 
 # --- OPML Engine (case-safe import) ---
 try:
-    from modules.Aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+    from modules.aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
 except Exception:
     try:
         from modules.aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
     except Exception:
         try:
-            from Aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+            from aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
         except Exception:
             try:
                 from aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
@@ -588,10 +588,10 @@ class DemoKitGUI(tk.Tk):
         """Create a new OPML document from the selection (or entire doc) without altering the original."""
         try:
             if EngineConfig is None:
-                messagebox.showerror("OPML", "Aopmlengine.py not found or failed to import.")
+                messagebox.showerror("OPML", "aopmlengine.py not found or failed to import.")
                 return
         except NameError:
-            messagebox.showerror("OPML", "Aopmlengine import not available.")
+            messagebox.showerror("OPML", "aopmlengine import not available.")
             return
 
         if getattr(self, "current_doc_id", None) is None:
@@ -642,10 +642,10 @@ class DemoKitGUI(tk.Tk):
         """Create OPML siblings for all selected docs. Originals are left untouched."""
         try:
             if EngineConfig is None:
-                messagebox.showerror("Batch OPML", "Aopmlengine.py not found or failed to import.")
+                messagebox.showerror("Batch OPML", "aopmlengine.py not found or failed to import.")
                 return
         except NameError:
-            messagebox.showerror("Batch OPML", "Aopmlengine import not available.")
+            messagebox.showerror("Batch OPML", "aopmlengine import not available.")
             return
 
         ids = self._get_selected_ids_from_sidebar()
@@ -708,7 +708,7 @@ class DemoKitGUI(tk.Tk):
         """Pick an .html/.htm file and import it directly as OPML (new doc)."""
         from pathlib import Path
         if EngineConfig is None:
-            messagebox.showerror("Import HTML → OPML", "Aopmlengine.py not found or failed to import.")
+            messagebox.showerror("Import HTML → OPML", "aopmlengine.py not found or failed to import.")
             return
         path = filedialog.askopenfilename(
             title="Import HTML → OPML",

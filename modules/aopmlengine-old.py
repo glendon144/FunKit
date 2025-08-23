@@ -316,83 +316,86 @@ def _ai_worker(tasks: list[AITask]):  # pragma: no cover (side‑effectful)
 
 
 # --- Public API ------------------------------------------------------------
-
-# ---- Engine config (single, top-level) ----
-from dataclasses import dataclass
-
 @dataclass
 class EngineConfig:
     enable_ai: bool = False
     owner_name: str | None = None
-    owner_email: str | None = None
     title: str | None = None
 
 
-# ---- small helper: tolerate cfg as object/dict/str/None ----
-def _cfg_get(cfg, key, default=""):
-    if cfg is None:
-        return default
-    if isinstance(cfg, dict):
-        return cfg.get(key, default)
-    return getattr(cfg, key, default)
-
-
-# ---- central entry the plugin prefers ----
-def convert_payload_to_opml(title: str, payload, cfg: EngineConfig | dict | None = None) -> str:
-    """
-    Main entry point used by opml_extras_plugin.
-    Detects HTML vs text and routes accordingly.
-    Returns XML text.
-    """
-    text = payload.decode("utf-8", "replace") if isinstance(payload, (bytes, bytearray)) else str(payload or "")
-    low = text.lower()
-    if ("<html" in low) or ("<body" in low) or ("<div" in low) or ("<p" in low):
-        doc = build_opml_from_html(title, text, cfg=cfg)
-    else:
-        doc = build_opml_from_text(title, text, cfg=cfg)
-    return doc.to_xml()  # assumes OPMLDocument has .to_xml()
-
-
-# ---- robust HTML path ----
-def build_opml_from_html(title: str, html: str, cfg: EngineConfig | dict | None = None):
-    """
-    Parse HTML → outline → OPMLDocument (no owner fields).
-    """
+def build_opml_from_html(html: str, cfg: EngineConfig | None = None) -> OPMLDocument:
+    cfg = cfg or EngineConfig()
     outline = html_to_outline(html)
-
-    _cfg_title   = _cfg_get(cfg, "title", "")
-    _final_title = (outline.text or _cfg_title or title or "Document")
-
-    # OPMLDocument doesn’t accept owner_* → don’t pass them
-    doc = OPMLDocument(title=_final_title)
-
-    # Transfer structure if any; otherwise add a single node
-    for child in getattr(outline, "children", []):
+    doc = OPMLDocument(title=cfg.title or outline.text or "Document", owner_name=cfg.owner_name)
+    # If html_to_outline returned a pseudo root with title and children, lift children
+    for child in outline.children:
         doc.add(child)
-    if not getattr(outline, "children", []):
-        doc.add(Outline(outline.text or _final_title))
-
+    if not outline.children:  # no structure, put all as single node
+        doc.add(Outline(outline.text))
     return doc
 
 
-# ---- robust TEXT path ----
-
-def build_opml_from_text(title: str, text: str, cfg: EngineConfig | dict | None = None):
-    """
-    Parse plain text → outline → OPMLDocument (no owner fields).
-    """
-    outline = text_to_outline(text, assumed_title=_cfg_get(cfg, "title", None))
-
-    _cfg_title   = _cfg_get(cfg, "title", "")
-    _final_title = (outline.text or _cfg_title or title or "Document")
-
-    # OPMLDocument doesn’t accept owner_* → don’t pass them
-    doc = OPMLDocument(title=_final_title)
-
-    for child in getattr(outline, "children", []):
+def build_opml_from_text(text: str, cfg: EngineConfig | None = None) -> OPMLDocument:
+    cfg = cfg or EngineConfig()
+    outline = text_to_outline(text, assumed_title=cfg.title)
+    doc = OPMLDocument(title=outline.text or (cfg.title or "Document"), owner_name=cfg.owner_name)
+    for child in outline.children:
+        # Detect long unstructured paragraphs for optional AI assist
+        if cfg.enable_ai and len(child.text) > 600 and not child.children:
+            sid = str(uuid.uuid4())
+            child._attrs["_ai_section_id"] = sid
         doc.add(child)
-    if not getattr(outline, "children", []):
-        doc.add(Outline(outline.text or _final_title))
+
+    # If AI is enabled, process marked sections concurrently and stitch results
+    if cfg.enable_ai and _HAVE_AI:
+        import threading
+
+        tasks: list[AITask] = []
+        for node in doc.outlines:
+            for sub in node.children or []:
+                pass  # reserved for future deep scan
+        # flat scan for _ai_section_id
+        def collect(nodes: list[Outline]):
+            for n in nodes:
+                if "_ai_section_id" in n._attrs and n.text:
+                    tasks.append(AITask(n._attrs["_ai_section_id"], n.text))
+                if n.children:
+                    collect(n.children)
+        collect(doc.outlines)
+
+        if tasks:
+            logger.info("Submitting %d sections to AI for OPML suggestions...", len(tasks))
+            th = threading.Thread(target=_ai_worker, args=(tasks,), daemon=True)
+            th.start()
+            th.join(timeout=60.0)
+            # Merge results
+            for tsk in tasks:
+                target = None
+                def find(nodes: list[Outline]) -> Outline | None:
+                    nonlocal target
+                    for n in nodes:
+                        if n._attrs.get("_ai_section_id") == tsk.section_id:
+                            target = n
+                            return n
+                        if n.children:
+                            r = find(n.children)
+                            if r:
+                                return r
+                    return None
+                find(doc.outlines)
+                if target and tsk.result_xml:
+                    # Best effort: wrap the AI XML under this node as raw children
+                    # Expecting <outline ...> children; we will not XML-parse here to avoid deps.
+                    target._attrs["_ai_status"] = "merged"
+                    target._attrs["_ai_note"] = "AI‑assisted structure appended"
+                    # Convert raw XML into Outline nodes conservatively by stripping tags
+                    items = re.findall(r"text=\"(.*?)\"", tsk.result_xml)
+                    for it in items:
+                        target.add(Outline(it))
+                elif target and tsk.error:
+                    target._attrs["_ai_status"] = f"error: {tsk.error}"
+    elif cfg.enable_ai and not _HAVE_AI:
+        logger.warning("AI requested but ai_interface.py not found; proceeding without AI.")
 
     return doc
 

@@ -28,7 +28,7 @@ def _resolve_engine():
         EngineConfig, build_opml_from_html, build_opml_from_text = EC, BOH, BOT
     except Exception:
         try:
-            from modules.Aopmlengine import EngineConfig as EC, build_opml_from_html as BOH, build_opml_from_text as BOT
+            from modules.aopmlengine import EngineConfig as EC, build_opml_from_html as BOH, build_opml_from_text as BOT
             EngineConfig, build_opml_from_html, build_opml_from_text = EC, BOH, BOT
         except Exception:
             pass
@@ -64,7 +64,7 @@ def _convert_current_to_opml(self):
 
     EC, BOH, BOT = _resolve_engine()
     if EC is None:
-        messagebox.showerror("Convert → OPML", "Aopmlengine.py not found or failed to import.")
+        messagebox.showerror("Convert → OPML", "aopmlengine.py not found or failed to import.")
         return
 
     if getattr(self, "current_doc_id", None) is None:
@@ -151,7 +151,7 @@ if not urls:
 
     EC, BOH, BOT = _resolve_engine()
     if EC is None:
-        messagebox.showerror("URL → OPML", "Aopmlengine.py not found or failed to import.")
+        messagebox.showerror("URL → OPML", "aopmlengine.py not found or failed to import.")
         return
 
     urls_text = SD.askstring("URL → OPML", "Enter one or more URLs (newline-separated):")

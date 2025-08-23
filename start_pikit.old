@@ -1,7 +1,0 @@
-export PIKIT_OPENAI_BASE_URL="http://localhost:8081/v1"
-unset PIKIT_OPENAI_API_KEY   #="sk-local"
-export PIKIT_MODEL_NAME="mistral-7b-instruct"
-export PIKIT_MAX_TOKENS_DEFAULT=256
-
-cd ~/src/PiKit
-python3 main.py

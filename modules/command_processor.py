@@ -1,4 +1,4 @@
-# PiKit Command Processor (updated with memory preamble + truncation)
+# PiKit Command Processor (updated with memory preamble + truncation + adaptive length)
 from __future__ import annotations
 
 import os
@@ -11,6 +11,13 @@ from modules.document_store import DocumentStore
 from modules.directory_import import import_text_files_from_directory
 from modules.ai_memory import get_memory, set_memory
 from modules.text_sanitizer import sanitize_ai_reply
+
+# ------------ Config (env-tunable) ------------
+SHORT_THRESHOLD_TOKENS = int(os.getenv("PIKIT_SHORT_THRESHOLD_TOKENS", "200"))
+SHORT_MAX_TOKENS       = int(os.getenv("PIKIT_SHORT_MAX_TOKENS", "220"))   # quick replies
+LONG_MAX_TOKENS        = int(os.getenv("PIKIT_LONG_MAX_TOKENS", "900"))    # detailed replies
+# If you simply want to "double tokens", bump LONG_MAX_TOKENS and/or SHORT_MAX_TOKENS above.
+# Timeout was already made env-configurable in ai_interface/local_ai_interface earlier.
 
 # Try to import a renderer for binary-as-text; provide a fallback shim if unavailable.
 try:
@@ -30,6 +37,13 @@ except Exception:  # pragma: no cover
             except Exception:
                 pass
             return str(data_or_path)
+
+
+def _approx_tokens(text: str) -> int:
+    """Very rough token estimate (~4 chars/token for English)."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
 
 
 def _normalize_row(row: Any) -> Tuple[Any, str, Any]:
@@ -125,16 +139,46 @@ class CommandProcessor:
             "Export CSV": self.doc_store.export_csv,
         }
 
+    # ----------------- Core prompting -----------------
+
+    def _choose_length_policy(self, prompt_text: str) -> tuple[int, str]:
+        """Return (max_tokens, steering_instructions) based on input size."""
+        n = _approx_tokens(prompt_text)
+        if n < SHORT_THRESHOLD_TOKENS:
+            steer = "Output: be concise — 3–5 bullet points or ≤6 sentences."
+            return SHORT_MAX_TOKENS, steer
+        else:
+            steer = "Output: thorough and structured; use short sections and examples where useful."
+            return LONG_MAX_TOKENS, steer
+
+    def _apply_overrides(self, prompt: str, max_tokens: int):
+        """Try to send max_tokens to the AI interface if supported; otherwise return prompt only."""
+        # Many of your local interfaces accept overrides= dict
+        try:
+            return {"overrides": {"max_tokens": max_tokens}}
+        except Exception:
+            return {}
+
     def ask_question(self, prompt: str) -> str | None:
-        """Send a standalone prompt to AI, applying memory preamble and truncation."""
+        """Send a standalone prompt to AI, applying memory preamble, adaptive length, and truncation."""
         try:
             conn = self._get_conn()
             mem = get_memory(conn, key="global") if conn else {}
             preamble = self._build_memory_preamble(mem)
-            full_prompt = (preamble + "\n\n" + prompt) if preamble else prompt
 
-            self.logger.info(f"Sending standalone prompt to AI: {full_prompt}")
-            response = self.ai.query(full_prompt)
+            # Adaptive length
+            max_toks, steer = self._choose_length_policy(prompt)
+            full_prompt_core = (preamble + "\n\n" + prompt) if preamble else prompt
+            full_prompt = f"{full_prompt_core}\n\n{steer}"
+
+            self.logger.info(f"Sending standalone prompt to AI (max_tokens={max_toks}): {full_prompt}")
+            kwargs = self._apply_overrides(full_prompt, max_toks)
+            try:
+                response = self.ai.query(full_prompt, **kwargs)
+            except TypeError:
+                # Fallback if interface doesn't accept overrides kwarg
+                response = self.ai.query(full_prompt)
+
             response = sanitize_ai_reply(response)
             self.logger.info("AI response received successfully")
             self._update_memory_breadcrumbs(prompt)
@@ -155,8 +199,8 @@ class CommandProcessor:
     ) -> None:
         """
         Send the selection to AI, create a new doc with the response, and optionally embed
-        a green link back into the source doc (text bodies only). Also applies memory preamble
-        and truncates likely-incomplete sentences.
+        a green link back into the source doc (text bodies only). Also applies memory preamble,
+        adaptive length, and truncates likely-incomplete sentences.
         """
         # Compose the base prompt
         base_prompt = f"{prefix} {selected_text}" if prefix else f"Please expand on this: {selected_text}"
@@ -165,13 +209,21 @@ class CommandProcessor:
         conn = self._get_conn()
         mem = get_memory(conn, key="global") if conn else {}
         preamble = self._build_memory_preamble(mem, current_doc_id=current_doc_id)
-        prompt = (preamble + "\n\n" + base_prompt) if preamble else base_prompt
+        prompt_core = (preamble + "\n\n" + base_prompt) if preamble else base_prompt
 
-        self.logger.info(f"Sending prompt: {prompt}")
+        # Adaptive length
+        max_toks, steer = self._choose_length_policy(base_prompt)
+        prompt = f"{prompt_core}\n\n{steer}"
+
+        self.logger.info(f"Sending prompt: max_tokens={max_toks} | {prompt}")
 
         # Call AI
         try:
-            reply = self.ai.query(prompt)
+            kwargs = self._apply_overrides(prompt, max_toks)
+            try:
+                reply = self.ai.query(prompt, **kwargs)
+            except TypeError:
+                reply = self.ai.query(prompt)
             reply = sanitize_ai_reply(reply)
         except Exception as e:
             self.logger.error(f"AI query failed: {e}")
@@ -313,6 +365,72 @@ class CommandProcessor:
         content = Path(path).read_text(encoding="utf-8", errors="replace")
         title = Path(path).stem
         return self.doc_store.add_document(title, content)
+     # --- OPML: helpers for string / URL / crawler -------------------------------
+import os
+import tempfile
+
+def import_opml_from_string(self, xml_text: str, source: str = "") -> int:
+    """
+    Import an OPML document provided as a string.
+    Bridges to import_opml_from_path by writing to a temp file.
+    Returns: new document id.
+    """
+    # choose a safe temp dir under storage if available
+    base_tmp = getattr(self, "storage_dir", None)
+    if not base_tmp:
+        base_tmp = os.path.join(os.getcwd(), "storage")
+    os.makedirs(base_tmp, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="opml_", suffix=".opml",
+                                     dir=base_tmp, delete=False) as tf:
+        tf.write(xml_text)
+        tmp_path = tf.name
+
+    # Optionally you could record 'source' somewhere if your importer supports it
+    try:
+        new_id = self.import_opml_from_path(tmp_path)
+        return new_id
+    finally:
+        # Keep the temp file if your importer needs it later; otherwise uncomment:
+        # try: os.remove(tmp_path)
+        # except Exception: pass
+        pass
+
+
+def import_opml_from_url(self, url: str, timeout: int = 15) -> int:
+    """
+    Fetch an OPML from URL and import it.
+    """
+    try:
+        import requests
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "PiKit/OPML-Importer"})
+        r.raise_for_status()
+        xml_text = r.text
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch OPML from URL: {e}")
+    return self.import_opml_from_string(xml_text, source=url)
+
+
+def crawl_opml_and_import(self, start: str, max_depth: int = 2) -> list[int]:
+    """
+    Crawl an OPML seed (URL or local path), gather linked OPMLs, and import each.
+    Returns the list of new document IDs.
+    """
+    try:
+        from modules.opml_crawler_adapter import crawl_opml
+    except Exception as e:
+        raise RuntimeError(f"OPML crawler not available: {e}")
+
+    results = crawl_opml(start, max_depth=max_depth)
+    new_ids: list[int] = []
+    for src, xml_text in results:
+        try:
+            new_id = self.import_opml_from_string(xml_text, source=src)
+            new_ids.append(new_id)
+        except Exception as e:
+            print(f"[opml] import failed for {src}: {e}")
+    return new_ids
+ 
 
     def import_directory(self, directory: str) -> None:
         """Bulk-import text files from a directory."""

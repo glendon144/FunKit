@@ -20,13 +20,13 @@ from modules.TreeView import open_tree_view
 
 # --- OPML Engine (case-safe import) ---
 try:
-    from modules.Aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+    from modules.aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
 except Exception:
     try:
         from modules.aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
     except Exception:
         try:
-            from Aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
+            from aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
         except Exception:
             try:
                 from aopmlengine import build_opml_from_text, build_opml_from_html, EngineConfig  # type: ignore
@@ -583,7 +583,7 @@ class DemoKitGUI(tk.Tk):
     def _convert_current_to_opml(self):
         """Create a new OPML document from the current selection or entire doc; leave original untouched."""
         if EngineConfig is None:
-            messagebox.showerror("OPML", "Aopmlengine.py not found or failed to import.")
+            messagebox.showerror("OPML", "aopmlengine.py not found or failed to import.")
             return
         if self.current_doc_id is None:
             messagebox.showwarning("OPML", "No document selected.")

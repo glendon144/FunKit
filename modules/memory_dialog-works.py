@@ -1,18 +1,25 @@
 """
 Memory Dialog for PiKit — with Presets (+ JSON Sanitizer integration)
 --------------------------------------------------------------------
-Tkinter dialog to view/edit AI memory stored in the `ai_memory` table.
+Drop-in Tkinter dialog to view/edit AI memory stored in the `ai_memory` table.
+Now includes one-click **Presets** to populate the editor with curated templates.
 
-Features:
-- Scope toggle: Global vs Doc memory
-- Presets menu to quickly insert common memory templates
-- "Sanitize JSON before sending" checkbox
-- "Preview → Model Text" shows exactly what will be sent (sanitized or raw)
-- "Copy → Model Text" copies that text to clipboard
+New in this version:
+- "Sanitize JSON before sending" checkbox (toggles plain-text rendering)
+- "Preview → Model Text" (shows a read-only preview of what would be sent)
+- "Copy → Model Text" (copies that exact text to the clipboard)
+
+Usage (in gui_tkinter.py):
+--------------------------
+from modules.memory_dialog import open_memory_dialog
+...
+toolsmenu = tk.Menu(menubar, tearoff=0)
+toolsmenu.add_command(label="Memory…", command=lambda: open_memory_dialog(self))
+menubar.add_cascade(label="Tools", menu=toolsmenu)
 
 Expectations:
-- `app.doc_store` has a `.conn` attribute (sqlite3 Connection) or a `.get_connection()`
-- `app.current_doc_id` is the current doc id or None
+- `app.doc_store` has a `.conn` attribute (sqlite3 Connection).
+- `app.current_doc_id` is the current document id or None.
 """
 
 from __future__ import annotations
@@ -22,16 +29,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from modules.ai_memory import get_memory, set_memory
-from modules.json_sanitizer import (
-    sanitize_json_to_plain,
-    get_pikit_sanitize_options,
-)
+# ⤵ Sanitizer module (your new helper file)
+from modules.json_sanitizer import sanitize_json_to_plain, SanitizeOptions
 
-# ---------- Presets you can tweak/extend ----------
+
 PRESETS: dict[str, dict] = {
     "Crisp & practical": {
         "persona": "succinct, pragmatic, no filler",
-        "style": "short prose paragaphs, don't show code unless requested",
+        "style": "prefer bullet lists; show code first, words second",
         "rules": ["absolute dates", "no markdown tables"]
     },
     "Explainer mode": {
@@ -61,8 +66,8 @@ PRESETS: dict[str, dict] = {
     },
     "Marketing tone": {
         "persona": "friendly product marketer",
-        "style": "benefit-led copy, short punchy sentences, clear CTA",
-        "rules": ["avoid jargon", "be positive and concrete", "2–4 bullets max"]
+        "style": "benefit-led copy, short punchy sentences, clear call-to-action",
+        "rules": ["avoid jargon", "be positive and concrete", "2–4 bullets max when listing"]
     },
     "Academic style": {
         "persona": "academic writer and editor",
@@ -72,7 +77,7 @@ PRESETS: dict[str, dict] = {
 }
 
 
-def _get_conn(app):
+def _get_conn(app) -> object | None:
     conn = getattr(app.doc_store, "conn", None)
     if conn:
         return conn
@@ -114,8 +119,7 @@ def open_memory_dialog(app) -> None:
     rb_global = ttk.Radiobutton(frm_top, text="Global", value="global", variable=mode_var)
     rb_global.pack(side="left", padx=(8, 4))
 
-    rb_doc = ttk.Radiobutton(frm_top, text=(f"Doc {doc_id}" if doc_id else "Doc (none)"),
-                             value="doc", variable=mode_var)
+    rb_doc = ttk.Radiobutton(frm_top, text=f"Doc {doc_id}" if doc_id else "Doc (none)", value="doc", variable=mode_var)
     rb_doc.pack(side="left", padx=(8, 4))
     if doc_id is None:
         rb_doc.state(["disabled"])
@@ -129,56 +133,6 @@ def open_memory_dialog(app) -> None:
     chk = ttk.Checkbutton(frm_btns, text="Sanitize JSON before sending", variable=sanitize_var)
     chk.pack(side="right")
 
-    # Buttons (left side)
-    ttk.Button(frm_btns, text="Load", command=lambda: load_current()).pack(side="left")
-    ttk.Button(frm_btns, text="Save", command=lambda: save_current()).pack(side="left", padx=6)
-    ttk.Button(frm_btns, text="Clear", command=lambda: clear_current()).pack(side="left")
-
-    # Preview / Copy buttons (center)
-    ttk.Button(frm_btns, text="Preview → Model Text", command=lambda: preview_model_text()).pack(side="left", padx=(12, 6))
-    ttk.Button(frm_btns, text="Copy → Model Text", command=lambda: copy_model_text()).pack(side="left")
-
-    # Presets menu
-    def apply_preset(name: str):
-        template = PRESETS.get(name, {})
-        txt.delete("1.0", "end")
-        txt.insert("1.0", json.dumps(template, indent=2, ensure_ascii=False))
-        status_var.set(f"Inserted preset: {name}")
-
-    preset_btn = ttk.Menubutton(frm_btns, text="Presets")
-    preset_menu = tk.Menu(preset_btn, tearoff=0)
-    for pname in PRESETS:
-        preset_menu.add_command(label=pname, command=lambda n=pname: apply_preset(n))
-    preset_btn["menu"] = preset_menu
-    preset_btn.pack(side="left", padx=(12, 0))
-
-    # --- Editor ---
-    frm_text = ttk.Frame(win)
-    frm_text.pack(fill="both", expand=True, padx=10, pady=(6, 4))
-
-    yscroll = ttk.Scrollbar(frm_text, orient="vertical")
-    xscroll = ttk.Scrollbar(frm_text, orient="horizontal")
-
-    txt = tk.Text(frm_text, wrap="none", undo=True, maxundo=2000)
-    txt.configure(font=("TkFixedFont", 10))
-
-    yscroll.config(command=txt.yview)
-    xscroll.config(command=txt.xview)
-    txt.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-
-    txt.grid(row=0, column=0, sticky="nsew")
-    yscroll.grid(row=0, column=1, sticky="ns")
-    xscroll.grid(row=1, column=0, sticky="ew")
-
-    frm_text.rowconfigure(0, weight=1)
-    frm_text.columnconfigure(0, weight=1)
-
-    # --- Status bar ---
-    status_var = tk.StringVar(value="")
-    status = ttk.Label(win, textvariable=status_var, anchor="w")
-    status.pack(fill="x", padx=10, pady=(0, 8))
-
-    # --- Helpers ---
     def load_current():
         key = _key_for_mode(mode_var.get(), doc_id)
         data = get_memory(conn, key=key)
@@ -227,41 +181,58 @@ def open_memory_dialog(app) -> None:
         except Exception as e:
             messagebox.showerror("PiKit", f"Failed clearing memory: {e}")
 
-    # Build exactly what we'd send to the model
+    # Buttons (left side)
+    ttk.Button(frm_btns, text="Load", command=load_current).pack(side="left")
+    ttk.Button(frm_btns, text="Save", command=save_current).pack(side="left", padx=6)
+    ttk.Button(frm_btns, text="Clear", command=clear_current).pack(side="left")
+
+    # Preview / Copy actions (center)
     def build_model_text() -> str:
+        """
+        Returns the exact text you'd hand to the model for this memory block,
+        honoring the sanitizer toggle.
+        """
         try:
             obj = parse_editor_json()
         except ValueError as e:
             messagebox.showerror("PiKit", str(e))
             return ""
         if sanitize_var.get():
-            opts = get_pikit_sanitize_options()  # ← PiKit defaults
+            # You can adjust options here globally if you like:
+            opts = SanitizeOptions(
+                indent=2,
+                sort_keys=True,
+                truncate_value_len=0,  # set e.g. 160 if you want shorter values
+                width=0,               # set e.g. 88 to soft-wrap long strings
+            )
             return sanitize_json_to_plain(obj, opts)
         else:
+            # Raw JSON, but as pretty text (not braces removed)
             return json.dumps(obj, indent=2, ensure_ascii=False)
 
     def preview_model_text():
         text = build_model_text()
         if not text:
             return
+        # Simple modal preview
         prev = tk.Toplevel(win)
         prev.title("Preview — Model Text")
         prev.geometry("720x520")
         prev.transient(win)
         prev.grab_set()
 
-        yscroll2 = ttk.Scrollbar(prev, orient="vertical")
-        xscroll2 = ttk.Scrollbar(prev, orient="horizontal")
+        yscroll = ttk.Scrollbar(prev, orient="vertical")
+        xscroll = ttk.Scrollbar(prev, orient="horizontal")
         view = tk.Text(prev, wrap="none")
         view.configure(font=("TkFixedFont", 10), state="normal")
 
-        yscroll2.config(command=view.yview)
-        xscroll2.config(command=view.xview)
-        view.config(yscrollcommand=yscroll2.set, xscrollcommand=xscroll2.set)
+        yscroll.config(command=view.yview)
+        xscroll.config(command=view.xview)
+        view.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
 
         view.grid(row=0, column=0, sticky="nsew")
-        yscroll2.grid(row=0, column=1, sticky="ns")
-        xscroll2.grid(row=1, column=0, sticky="ew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
         prev.rowconfigure(0, weight=1)
         prev.columnconfigure(0, weight=1)
 
@@ -285,9 +256,53 @@ def open_memory_dialog(app) -> None:
         except Exception as e:
             messagebox.showerror("PiKit", f"Clipboard error: {e}")
 
-    # Load initial content + set window close behavior
+    ttk.Button(frm_btns, text="Preview → Model Text", command=preview_model_text).pack(side="left", padx=(12, 6))
+    ttk.Button(frm_btns, text="Copy → Model Text", command=copy_model_text).pack(side="left")
+
+    # --- Presets ---
+    def apply_preset(name: str):
+        template = PRESETS.get(name, {})
+        txt.delete("1.0", "end")
+        txt.insert("1.0", json.dumps(template, indent=2, ensure_ascii=False))
+        status_var.set(f"Inserted preset: {name}")
+
+    preset_btn = ttk.Menubutton(frm_btns, text="Presets")
+    preset_menu = tk.Menu(preset_btn, tearoff=0)
+    for pname in PRESETS:
+        preset_menu.add_command(label=pname, command=lambda n=pname: apply_preset(n))
+    preset_btn["menu"] = preset_menu
+    preset_btn.pack(side="left", padx=(12, 0))
+
+    # --- Text editor ---
+    frm_text = ttk.Frame(win)
+    frm_text.pack(fill="both", expand=True, padx=10, pady=(6, 4))
+
+    yscroll = ttk.Scrollbar(frm_text, orient="vertical")
+    xscroll = ttk.Scrollbar(frm_text, orient="horizontal")
+
+    txt = tk.Text(frm_text, wrap="none", undo=True, maxundo=2000)
+    txt.configure(font=("TkFixedFont", 10))
+
+    yscroll.config(command=txt.yview)
+    xscroll.config(command=txt.xview)
+    txt.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+    txt.grid(row=0, column=0, sticky="nsew")
+    yscroll.grid(row=0, column=1, sticky="ns")
+    xscroll.grid(row=1, column=0, sticky="ew")
+
+    frm_text.rowconfigure(0, weight=1)
+    frm_text.columnconfigure(0, weight=1)
+
+    # --- Status bar ---
+    status_var = tk.StringVar(value="")
+    status = ttk.Label(win, textvariable=status_var, anchor="w")
+    status.pack(fill="x", padx=10, pady=(0, 8))
+
+    # Load initial content
     load_current()
 
+    # Close behavior
     def on_close():
         win.grab_release()
         win.destroy()
