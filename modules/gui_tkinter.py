@@ -199,7 +199,8 @@ class App(tk.Tk):
         processor_pos = args[1] if len(args) >= 2 else None
 
         super().__init__()
-        self.title("PiKit / DemoKit — GUI")
+        self.title("PiKit / DemoKit — GUI v1.31")
+ 
         self.geometry("1180x780")
 
         # Public state
