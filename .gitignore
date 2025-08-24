@@ -6,6 +6,11 @@ Thumbs.db
 # Python artefacts
 *.pyc
 __pycache__/
+# local docs
+
+exported_docs/
+backup_exported_docs/
+
 
 # Virtual-envs
 venv/
@@ -39,3 +44,5 @@ fb_*token.txt
 dist/
 build/
 mistral-token
+exported_docs/
+backup_exported_docs/
