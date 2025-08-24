@@ -11,7 +11,7 @@
 from pathlib import Path
 
 __author__ = "Steve Dower <steve.dower@python.org>"
-__version__ = "1.0.0.0"
+__version__ = "1.20"
 
 def fix(p):
     with open(p, 'r', encoding='utf-8-sig') as f:

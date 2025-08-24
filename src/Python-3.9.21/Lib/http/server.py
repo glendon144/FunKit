@@ -80,7 +80,7 @@ XXX To do:
 # (Actually, the latter is only true if you know the server configuration
 # at the time the request was made!)
 
-__version__ = "0.6"
+__version__ = "1.20"
 
 __all__ = [
     "HTTPServer", "ThreadingHTTPServer", "BaseHTTPRequestHandler",

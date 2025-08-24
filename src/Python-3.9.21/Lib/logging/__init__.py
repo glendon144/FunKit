@@ -44,7 +44,7 @@ import threading
 __author__  = "Vinay Sajip <vinay_sajip@red-dove.com>"
 __status__  = "production"
 # The following module attributes are no longer updated.
-__version__ = "0.5.1.2"
+__version__ = "1.20"
 __date__    = "07 February 2010"
 
 #---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ See python make_layout.py --help for usage.
 """
 
 __author__ = "Steve Dower <steve.dower@python.org>"
-__version__ = "3.8"
+__version__ = "1.20"
 
 import argparse
 import functools

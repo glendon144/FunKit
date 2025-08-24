@@ -110,7 +110,7 @@ __copyright__ = """
 
 """
 
-__version__ = '1.0.8'
+__version__ = '1.20'
 
 import collections
 import os

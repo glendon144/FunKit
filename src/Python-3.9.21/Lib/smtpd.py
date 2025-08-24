@@ -95,7 +95,7 @@ __all__ = [
 ]
 
 program = sys.argv[0]
-__version__ = 'Python SMTP proxy version 0.3'
+__version__ = '1.20'
 
 
 class Devnull:

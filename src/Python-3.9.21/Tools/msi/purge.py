@@ -5,7 +5,7 @@
 #
 
 __author__ = 'Steve Dower <steve.dower@python.org>'
-__version__ = '1.0.0'
+__version__ = '1.20'
 
 import re
 import sys

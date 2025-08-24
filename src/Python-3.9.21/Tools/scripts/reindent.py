@@ -41,7 +41,7 @@ user/group and permissions could leave the backup file more readable than
 you'd prefer. You can always use the --nobackup option to prevent this.
 """
 
-__version__ = "1"
+__version__ = "1.20"
 
 import tokenize
 import os

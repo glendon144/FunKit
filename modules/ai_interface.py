@@ -1,205 +1,213 @@
-#!/usr/bin/env python3
 """
-ai_interface.py — OpenAI-compatible adapter for PiKit (llama.cpp server)
-- Always sends Authorization header from PIKIT_OPENAI_API_KEY
-- Builds clean /v1/chat/completions payloads
-- Default max_tokens from PIKIT_MAX_TOKENS_DEFAULT (256)
-- ASK-first alias + TriAIInterface shim
-- Debug logging when PIKIT_DEBUG=1
+ai_interface.py — Baseten (OpenAI-compatible) client shim
+Release: v1.31.3 (fix: .query supports positional args)
+Requires: openai>=1.0.0
 """
 
 from __future__ import annotations
-import os, json, typing as t, requests
 
-Json = t.Dict[str, t.Any]
-Headers = t.Dict[str, str]
+import os
+import time
+from typing import Generator, Iterable, List, Optional
 
-def _env(name: str, default: str) -> str:
-    v = os.getenv(name)
-    return v if v is not None and v != "" else default
+from openai import OpenAI
+from openai._exceptions import APIError, RateLimitError, APITimeoutError, APIConnectionError
 
-DEFAULT_BASE_URL = _env("PIKIT_OPENAI_BASE_URL", "http://localhost:8081/v1").rstrip("/")
-DEFAULT_API_KEY  = _env("PIKIT_OPENAI_API_KEY", "pikit-local")   # <— your server uses this key
-DEFAULT_MODEL    = _env("PIKIT_MODEL_NAME", "mistral-7b-instruct")
-DEFAULT_TIMEOUT  = float(_env("PIKIT_REQUEST_TIMEOUT", "600"))
-DEFAULT_TEMP     = float(_env("PIKIT_CHAT_TEMPERATURE", "0.7"))
-DEFAULT_MAXTOK   = int(_env("PIKIT_MAX_TOKENS_DEFAULT", "256"))
-DEBUG            = _env("PIKIT_DEBUG", "0") == "1"
 
-def _as_messages(user_or_messages: t.Union[str, t.List[Json]], system_prompt: t.Optional[str]) -> t.List[Json]:
-    if isinstance(user_or_messages, str):
-        msgs = [{"role": "user", "content": user_or_messages}]
-    else:
-        msgs = list(user_or_messages)
-    if system_prompt:
-        if not msgs or msgs[0].get("role") != "system":
-            msgs = [{"role": "system", "content": system_prompt}] + msgs
-    return msgs
+DEFAULT_BASE_URL = os.getenv("BASETEN_BASE_URL", "https://inference.baseten.co/v1")
+DEFAULT_MODEL    = os.getenv("BASETEN_MODEL", "openai/gpt-oss-120b")
+DEFAULT_TIMEOUT  = float(os.getenv("OPENAI_API_TIMEOUT", "60"))
 
-def _prune(d: Json) -> Json:
-    out: Json = {}
-    for k, v in d.items():
-        if v is None:  # drop nulls
-            continue
-        if isinstance(v, (list, dict, str)) and not v:  # drop empties
-            continue
-        out[k] = v
-    return out
+
+def _mk_client(api_key: Optional[str] = None,
+               base_url: Optional[str] = None,
+               timeout: Optional[float] = None) -> OpenAI:
+    key = api_key or os.getenv("BASETEN_API_KEY")
+    if not key:
+        raise RuntimeError("BASETEN_API_KEY is not set")
+    return OpenAI(
+        api_key=key,
+        base_url=base_url or DEFAULT_BASE_URL,
+        timeout=timeout or DEFAULT_TIMEOUT,
+    )
+
+
+def _retryable(func, /, *, retries: int = 2, backoff: float = 0.8):
+    def _wrapped(*args, **kwargs):
+        delay = backoff
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except (RateLimitError, APITimeoutError, APIConnectionError, APIError) as e:
+                last_err = e
+                if attempt >= retries:
+                    break
+                time.sleep(delay)
+                delay *= 2
+        raise last_err
+    return _wrapped
+
 
 class AIInterface:
-    def __init__(
-        self,
-        base_url: str | None = None,
-        api_key: str | None = None,
-        model: str | None = None,
-        timeout: float | None = None,
-        default_temperature: float | None = None,
-        max_tokens_default: int | None = None,
-    ):
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        self.api_key  = api_key if api_key not in (None, "") else DEFAULT_API_KEY
-        self.model    = model or DEFAULT_MODEL
-        self.timeout  = timeout if timeout is not None else DEFAULT_TIMEOUT
-        self.default_temperature = default_temperature if default_temperature is not None else DEFAULT_TEMP
-        self.max_tokens_default  = int(max_tokens_default) if max_tokens_default is not None else DEFAULT_MAXTOK
-        self._session = requests.Session()
-        self._system_prompt: str | None = None
+    """Back-compat wrapper exposing multiple method names used in older code."""
 
-    # Optional system prompt
-    def set_system_prompt(self, text: str | None) -> None:
-        self._system_prompt = text or None
+    def __init__(self,
+                 api_key: Optional[str] = None,
+                 base_url: Optional[str] = None,
+                 model: Optional[str] = None,
+                 timeout: Optional[float] = None):
+        self.model = model or DEFAULT_MODEL
+        self.client = _mk_client(api_key=api_key, base_url=base_url, timeout=timeout)
 
-    def get_config(self) -> Json:
-        return {
-            "base_url": self.base_url,
-            "model": self.model,
-            "timeout": self.timeout,
-            "default_temperature": self.default_temperature,
-            "max_tokens_default": self.max_tokens_default,
-            "has_system_prompt": bool(self._system_prompt),
-            "sends_auth_header": True,
-        }
+    # ---------- Core methods ----------
 
-    def _headers(self, extra_headers: t.Optional[Headers] = None) -> Headers:
-        h: Headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
-        if extra_headers:
-            h.update(extra_headers)
-        return h
+    @_retryable
+    def chat(self,
+             *,
+             messages: List[dict],
+             model: Optional[str] = None,
+             temperature: float = 1.0,
+             top_p: float = 1.0,
+             max_tokens: int = 1000,
+             presence_penalty: float = 0.0,
+             frequency_penalty: float = 0.0,
+             stop: Optional[Iterable[str]] = None,
+             extra: Optional[dict] = None) -> str:
+        kwargs = dict(
+            model=model or self.model,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+        )
+        if stop:
+            kwargs["stop"] = list(stop)
+        if extra:
+            kwargs.update(extra)
+        resp = self.client.chat.completions.create(**kwargs)
+        if not resp.choices:
+            return ""
+        return resp.choices[0].message.content or ""
 
-    def chat(
-        self,
-        prompt_or_messages: t.Union[str, t.List[Json]],
-        stream: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        tools: t.Optional[t.List[Json]] = None,
-        tool_choice: t.Optional[t.Union[str, Json]] = None,
-        stop: t.Optional[t.Union[str, t.List[str]]] = None,
-        extra_headers: t.Optional[Headers] = None,
-        **extra: t.Any,
-    ) -> t.Union[str, t.Iterator[str]]:
-        url = f"{self.base_url}/chat/completions"
-        msgs = _as_messages(prompt_or_messages, self._system_prompt)
-        payload: Json = {
-            "model": self.model,
-            "messages": msgs,
-            "temperature": self.default_temperature if temperature is None else temperature,
-            "max_tokens": int(max_tokens) if max_tokens is not None else self.max_tokens_default,
-            # llama.cpp ignores tools/tool_choice today, but keep fields off unless provided
-        }
-        if tools is not None:       payload["tools"] = tools
-        if tool_choice is not None: payload["tool_choice"] = tool_choice
-        if stop is not None:        payload["stop"] = stop
-        # merge any extras, then prune empties/None
-        payload = _prune({**payload, **extra})
+    def stream(self,
+               *,
+               messages: List[dict],
+               model: Optional[str] = None,
+               temperature: float = 1.0,
+               top_p: float = 1.0,
+               max_tokens: int = 1000,
+               presence_penalty: float = 0.0,
+               frequency_penalty: float = 0.0,
+               stop: Optional[Iterable[str]] = None,
+               include_usage: bool = True,
+               continuous_usage_stats: bool = True,
+               extra: Optional[dict] = None) -> Generator[str, None, None]:
+        kwargs = dict(
+            model=model or self.model,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            stream=True,
+            stream_options={
+                "include_usage": include_usage,
+                "continuous_usage_stats": continuous_usage_stats,
+            },
+        )
+        if stop:
+            kwargs["stop"] = list(stop)
+        if extra:
+            kwargs.update(extra)
 
-        if DEBUG:
-            print("[AIInterface] POST", url)
-            print("[AIInterface] Headers:", {k: ("<redacted>" if k.lower()=="authorization" else v)
-                                             for k, v in self._headers(extra_headers).items()})
-            print("[AIInterface] Payload:", json.dumps(payload, ensure_ascii=False))
+        opener = _retryable(self.client.chat.completions.create)
+        response = opener(**kwargs)
+        for chunk in response:
+            try:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+            except Exception:
+                continue
+
+    # ---------- Convenience ----------
+
+    def quick_ask(self,
+                  prompt: str,
+                  *,
+                  system: Optional[str] = None,
+                  model: Optional[str] = None,
+                  stream: bool = False,
+                  **kw):
+        messages: List[dict] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        if stream:
+            return self.stream(messages=messages, model=model, **kw)
+        return self.chat(messages=messages, model=model, **kw)
+
+    # ---------- Back-compat aliases ----------
+
+    def generate(self, *args, **kwargs):
+        return self.chat(*args, **kwargs)
+
+    def complete(self, *args, **kwargs):
+        return self.chat(*args, **kwargs)
+
+    def chat_stream(self, *args, **kwargs):
+        return self.stream(*args, **kwargs)
+
+    # ---------- Back-compat entry points ----------
+
+    def query(self, *args, **kwargs):
+        """Accepts positional or keyword usage.
+        Forms supported:
+          ai.query(messages=[...], stream=False, **kw)
+          ai.query("prompt")
+          ai.query("prompt", "system/prefix")
+        """
+        messages = kwargs.pop("messages", None)
+        prompt = kwargs.pop("prompt", None)
+        system = kwargs.pop("system", None)
+        stream = kwargs.pop("stream", False)
+
+        # normalize positional args
+        if args:
+            if len(args) == 1:
+                prompt = args[0]
+            else:
+                prompt = args[0]
+                system = args[1]
+
+        if messages is None:
+            if prompt is None:
+                raise ValueError("query() requires messages=[...] or a prompt string")
+            msgs: List[dict] = []
+            if system:
+                msgs.append({"role": "system", "content": system})
+            msgs.append({"role": "user", "content": str(prompt)})
+        else:
+            msgs = messages
 
         if stream:
-            payload["stream"] = True
-            resp = self._session.post(url, headers=self._headers(extra_headers),
-                                      json=payload, timeout=self.timeout, stream=True)
-            resp.raise_for_status()
-            return self._stream_text(resp)
-        else:
-            resp = self._session.post(url, headers=self._headers(extra_headers),
-                                      json=payload, timeout=self.timeout)
-            return self._extract_text(resp)
+            return self.stream(messages=msgs, **kwargs)
+        return self.chat(messages=msgs, **kwargs)
 
-    def embed(self, texts: t.List[str], model: str | None = None) -> t.List[t.List[float]]:
-        url = f"{self.base_url}/embeddings"
-        payload: Json = _prune({
-            "model": model or self.model,
-            "input": texts,
-        })
-        if DEBUG:
-            print("[AIInterface] POST", url)
-            print("[AIInterface] Headers:", {"Content-Type":"application/json","Authorization":"<redacted>"})
-            print("[AIInterface] Payload:", json.dumps(payload, ensure_ascii=False))
-        resp = self._session.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        return [item["embedding"] for item in data.get("data", [])]
+    def stream_query(self, *args, **kwargs) -> Generator[str, None, None]:
+        kwargs["stream"] = True
+        gen = self.query(*args, **kwargs)
+        # ensure a generator is returned
+        if hasattr(gen, "__iter__") and not isinstance(gen, (str, bytes)):
+            return gen
+        # fallback: wrap string into a one-shot generator
+        def _one():
+            yield str(gen)
+        return _one()
 
-    # --- helpers -------------------------------------------------------------
 
-    def _extract_text(self, resp: requests.Response) -> str:
-        try:
-            resp.raise_for_status()
-        except Exception as e:
-            raise RuntimeError(self._format_http_error(resp, e))
-        data = resp.json()
-        # OpenAI-like schema
-        try:
-            return data["choices"][0]["message"]["content"] or ""
-        except Exception:
-            # Fallback for engines that use "text"
-            try:
-                return data["choices"][0].get("text", "") or ""
-            except Exception:
-                raise RuntimeError(f"Unexpected response: {json.dumps(data)[:800]}")
-
-    def _stream_text(self, resp: requests.Response) -> t.Iterator[str]:
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            payload = line[6:].strip() if line.startswith("data: ") else line.strip()
-            if payload == "[DONE]":
-                break
-            try:
-                j = json.loads(payload)
-                delta = j.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                if delta:
-                    yield delta
-            except Exception:
-                # best-effort passthrough
-                yield payload
-
-    def _format_http_error(self, resp: requests.Response, exc: Exception) -> str:
-        body = ""
-        try:
-            body = resp.text
-        except Exception:
-            pass
-        return f"HTTP {resp.status_code}: {exc}\n{body[:1000]}"
-
-    # Legacy aliases / shims
-    def ask(self, prompt_or_messages, **kw): return self.chat(prompt_or_messages, **kw)
-    def query(self, prompt_or_messages, **kw): return self.chat(prompt_or_messages, **kw)
-    def completions(self, prompt_or_messages, **kw): return self.chat(prompt_or_messages, **kw)
-    def completion(self, prompt_or_messages, **kw): return self.chat(prompt_or_messages, **kw)
-    def complete(self, prompt_or_messages, **kw): return self.chat(prompt_or_messages, **kw)
-    def chat_completions(self, prompt_or_messages, **kw): return self.chat(prompt_or_messages, **kw)
-
-class TriAIInterface(AIInterface):
-    pass
-
-__all__ = ["AIInterface", "TriAIInterface"]
-
+def make_default() -> AIInterface:
+    return AIInterface()

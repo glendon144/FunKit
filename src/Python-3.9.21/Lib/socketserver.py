@@ -120,7 +120,7 @@ BaseServer:
 
 # Author of the BaseServer patch: Luke Kenneth Casson Leighton
 
-__version__ = "0.4"
+__version__ = "1.20"
 
 
 import socket

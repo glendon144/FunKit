@@ -46,7 +46,7 @@ Where:
         initial color, as a color name or #RRGGBB format
 """
 
-__version__ = '1.4.1'
+__version__ = '1.20'
 
 import sys
 import os

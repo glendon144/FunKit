@@ -25,7 +25,7 @@ written in Python.
 # responsible for its maintenance.
 #
 
-__version__ = "2.6"
+__version__ = "1.20"
 
 
 # Imports

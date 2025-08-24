@@ -145,7 +145,7 @@ class CommandProcessor:
         """Return (max_tokens, steering_instructions) based on input size."""
         n = _approx_tokens(prompt_text)
         if n < SHORT_THRESHOLD_TOKENS:
-            steer = "Output: be concise —  ≤6 sentences."
+            steer = "Output: be thorough and eloquent"
             return SHORT_MAX_TOKENS, steer
         else:
             steer = "Output: thorough and structured; use short sections and examples where useful."

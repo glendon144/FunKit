@@ -20,7 +20,7 @@ Public functions:       Internaldate2tuple
 # PROXYAUTH contributed by Rick Holbert <holbert.13@osu.edu> November 2002.
 # GET/SETANNOTATION contributed by Tomas Lindroos <skitta@abo.fi> June 2005.
 
-__version__ = "2.58"
+__version__ = "1.20"
 
 import binascii, errno, random, re, socket, subprocess, sys, time, calendar
 from datetime import datetime, timezone, timedelta

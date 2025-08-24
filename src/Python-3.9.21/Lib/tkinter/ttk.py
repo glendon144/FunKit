@@ -12,7 +12,7 @@ maintaining the widget state and invoking callbacks, all aspects
 of the widgets appearance lies at Themes.
 """
 
-__version__ = "0.3.1"
+__version__ = "1.20"
 
 __author__ = "Guilherme Polo <ggpolo@gmail.com>"
 

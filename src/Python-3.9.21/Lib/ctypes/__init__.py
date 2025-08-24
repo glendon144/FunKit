@@ -3,7 +3,7 @@
 import os as _os, sys as _sys
 import types as _types
 
-__version__ = "1.1.0"
+__version__ = "1.20"
 
 from _ctypes import Union, Structure, Array
 from _ctypes import _Pointer

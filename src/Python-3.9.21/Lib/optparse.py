@@ -21,7 +21,7 @@ Simple usage example:
    (options, args) = parser.parse_args()
 """
 
-__version__ = "1.5.3"
+__version__ = "1.20"
 
 __all__ = ['Option',
            'make_option',

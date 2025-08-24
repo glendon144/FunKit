@@ -33,7 +33,7 @@ import struct
 import array
 from email.parser import HeaderParser
 
-__version__ = "1.2"
+__version__ = "1.20"
 
 MESSAGES = {}
 

@@ -19,9 +19,9 @@ def _env(name: str, default: str) -> str:
     return v if v is not None and v != "" else default
 
 DEFAULT_BASE_URL = _env("PIKIT_OPENAI_BASE_URL", "http://localhost:8081/v1").rstrip("/")
-DEFAULT_API_KEY  = _env("PIKIT_OPENAI_API_KEY", "pykit-local")   # <— your server uses this key
+DEFAULT_API_KEY  = _env("PIKIT_OPENAI_API_KEY", "pikit-local")   # <— your server uses this key
 DEFAULT_MODEL    = _env("PIKIT_MODEL_NAME", "mistral-7b-instruct")
-DEFAULT_TIMEOUT  = float(_env("PIKIT_REQUEST_TIMEOUT", "120"))
+DEFAULT_TIMEOUT  = float(_env("PIKIT_REQUEST_TIMEOUT", "600"))
 DEFAULT_TEMP     = float(_env("PIKIT_CHAT_TEMPERATURE", "0.7"))
 DEFAULT_MAXTOK   = int(_env("PIKIT_MAX_TOKENS_DEFAULT", "256"))
 DEBUG            = _env("PIKIT_DEBUG", "0") == "1"

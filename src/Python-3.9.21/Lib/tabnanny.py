@@ -18,7 +18,7 @@ releases; such changes may not be backward compatible.
 # XXX The API needs to undergo changes however; the current code is too
 # XXX script-like.  This will be addressed later.
 
-__version__ = "6"
+__version__ = "1.20"
 
 import os
 import sys

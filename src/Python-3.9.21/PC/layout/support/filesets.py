@@ -3,7 +3,7 @@ File sets and globbing helper for make_layout.
 """
 
 __author__ = "Steve Dower <steve.dower@python.org>"
-__version__ = "3.8"
+__version__ = "1.20"
 
 import os
 

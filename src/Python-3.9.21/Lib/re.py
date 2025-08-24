@@ -140,7 +140,7 @@ __all__ = [
     "UNICODE",
 ]
 
-__version__ = "2.2.1"
+__version__ = "1.20"
 
 class RegexFlag(enum.IntFlag):
     ASCII = A = sre_compile.SRE_FLAG_ASCII # assume ascii "locale"

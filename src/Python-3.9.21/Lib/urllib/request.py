@@ -133,7 +133,7 @@ __all__ = [
 ]
 
 # used in User-Agent header sent
-__version__ = '%d.%d' % sys.version_info[:2]
+__version__ = '1.20' % sys.version_info[:2]
 
 _opener = None
 def urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,

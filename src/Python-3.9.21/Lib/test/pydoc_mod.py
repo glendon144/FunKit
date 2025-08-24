@@ -5,7 +5,7 @@ import typing
 
 __author__ = "Benjamin Peterson"
 __credits__ = "Nobody"
-__version__ = "1.2.3.4"
+__version__ = "1.20"
 __xyz__ = "X, Y and Z"
 
 class A:

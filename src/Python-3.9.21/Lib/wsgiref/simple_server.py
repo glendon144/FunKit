@@ -16,7 +16,7 @@ import urllib.parse
 from wsgiref.handlers import SimpleHandler
 from platform import python_implementation
 
-__version__ = "0.2"
+__version__ = "1.20"
 __all__ = ['WSGIServer', 'WSGIRequestHandler', 'demo_app', 'make_server']
 
 

@@ -3,7 +3,7 @@ Extraction and file list generation for pip.
 """
 
 __author__ = "Steve Dower <steve.dower@python.org>"
-__version__ = "3.8"
+__version__ = "1.20"
 
 
 import os

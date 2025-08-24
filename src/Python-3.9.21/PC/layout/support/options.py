@@ -3,7 +3,7 @@ List of optional components.
 """
 
 __author__ = "Steve Dower <steve.dower@python.org>"
-__version__ = "3.8"
+__version__ = "1.20"
 
 
 __all__ = []

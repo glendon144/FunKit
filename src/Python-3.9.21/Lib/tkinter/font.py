@@ -6,7 +6,7 @@
 import itertools
 import tkinter
 
-__version__ = "0.9"
+__version__ = "1.20"
 __all__ = ["NORMAL", "ROMAN", "BOLD", "ITALIC",
            "nametofont", "Font", "families", "names"]
 
