@@ -26,9 +26,11 @@ import xml.etree.ElementTree as ET
 # ---- Optional image support (Pillow) ----
 try:
     from PIL import Image, ImageTk  # type: ignore
+
     PIL_AVAILABLE = True
 except Exception:
     PIL_AVAILABLE = False
+
 
 # ---- Safe importer ----
 def _try_import(modpath: str, name: str | None = None, default=None):
@@ -38,14 +40,15 @@ def _try_import(modpath: str, name: str | None = None, default=None):
     except Exception:
         return default
 
+
 # ---- Primary module names ----
 command_processor_mod = _try_import("modules.command_processor")
-document_store_mod    = _try_import("modules.document_store")
-hypertext_parser_mod  = _try_import("modules.hypertext_parser")
-renderer_mod          = _try_import("modules.renderer")
-opml_plugin           = _try_import("modules.opml_extras_plugin_v3")
-logger_mod            = _try_import("modules.logger")
-flask_server_path     = Path("modules") / "flask_server.py"
+document_store_mod = _try_import("modules.document_store")
+hypertext_parser_mod = _try_import("modules.hypertext_parser")
+renderer_mod = _try_import("modules.renderer")
+opml_plugin = _try_import("modules.opml_extras_plugin_v3")
+logger_mod = _try_import("modules.logger")
+flask_server_path = Path("modules") / "flask_server.py"
 
 # ---- Legacy/alternate module names (shims) ----
 if command_processor_mod is None:
@@ -79,12 +82,14 @@ Logger = getattr(logger_mod or object(), "Logger", None)
 
 # ---------- Helpers ----------
 
+
 def _human_size(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
             return f"{n:.0f} {unit}" if unit == "B" else f"{n/1024:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
+
 
 def _extract_title_content(doc: Any) -> Tuple[str, Any]:
     """Return (title, content) from dict / sqlite3.Row / list/tuple / other."""
@@ -134,22 +139,28 @@ def _extract_title_content(doc: Any) -> Tuple[str, Any]:
 
     return "", str(doc)
 
-_BASE64_CHARS = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n \t")
+
+_BASE64_CHARS = set(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n \t"
+)
+
+
 def _looks_like_b64_text(s: str) -> bool:
     if not isinstance(s, str) or len(s) < 200:
         return False
     # strip header
     i = s.find("base64,")
-    payload = s[i+7:] if i != -1 else s
+    payload = s[i + 7 :] if i != -1 else s
     payload = "".join(payload.split())
     if len(payload) % 4 != 0:
         return False
     head = payload[:200]
     return all(ord(ch) < 128 and ch.encode() in _BASE64_CHARS for ch in head)
 
+
 def _decode_b64_text(s: str) -> Optional[bytes]:
     i = s.find("base64,")
-    payload = s[i+7:] if i != -1 else s
+    payload = s[i + 7 :] if i != -1 else s
     payload = "".join(payload.split())
     try:
         return base64.b64decode(payload, validate=True)
@@ -160,6 +171,7 @@ def _decode_b64_text(s: str) -> Optional[bytes]:
         except Exception:
             return None
 
+
 def _looks_like_b64_bytes(b: bytes) -> bool:
     if not isinstance(b, (bytes, bytearray)) or len(b) < 200:
         return False
@@ -168,6 +180,7 @@ def _looks_like_b64_bytes(b: bytes) -> bool:
         return False
     stripped = b"".join(ch for ch in b if ch in _BASE64_CHARS)
     return len(stripped) % 4 == 0
+
 
 def _decode_b64_bytes(b: bytes) -> Optional[bytes]:
     payload = b"".join(ch for ch in b if ch in _BASE64_CHARS)
@@ -180,6 +193,7 @@ def _decode_b64_bytes(b: bytes) -> Optional[bytes]:
         except Exception:
             return None
 
+
 def _make_preview(title: str, content: Any) -> str:
     generic = {"ai response", "response", "untitled", ""}
     tnorm = (title or "").strip().lower()
@@ -191,7 +205,9 @@ def _make_preview(title: str, content: Any) -> str:
         return (preview + "…") if len(words) > 10 else preview
     return title or "(untitled)"
 
+
 # ---------- App ----------
+
 
 class App(tk.Tk):
     def __init__(self, *args, **kwargs):
@@ -200,7 +216,7 @@ class App(tk.Tk):
 
         super().__init__()
         self.title("PiKit / DemoKit — GUI v1.31")
- 
+
         self.geometry("1180x780")
 
         # Public state
@@ -217,7 +233,11 @@ class App(tk.Tk):
         self.processor = kwargs.get("processor") or processor_pos
         self.logger = getattr(self.processor, "logger", Logger() if Logger else None)
 
-        if self.doc_store is None and document_store_mod and hasattr(document_store_mod, "DocumentStore"):
+        if (
+            self.doc_store is None
+            and document_store_mod
+            and hasattr(document_store_mod, "DocumentStore")
+        ):
             try:
                 self.doc_store = document_store_mod.DocumentStore()
             except Exception as e:
@@ -242,14 +262,18 @@ class App(tk.Tk):
         filemenu.add_command(label="Import Text…", command=self._import_text_file)
         filemenu.add_command(label="Export Current…", command=self._export_current)
         filemenu.add_separator()
-        filemenu.add_command(label="Export to Intraweb (Flask)…", command=self._export_and_launch_flask)
+        filemenu.add_command(
+            label="Export to Intraweb (Flask)…", command=self._export_and_launch_flask
+        )
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
 
         opmlmenu = tk.Menu(menubar, tearoff=0)
         opmlmenu.add_command(label="Open OPML/XML…", command=self._open_opml_from_file)
-        opmlmenu.add_command(label="Convert Selection → OPML", command=self._convert_selection_to_opml)
+        opmlmenu.add_command(
+            label="Convert Selection → OPML", command=self._convert_selection_to_opml
+        )
         menubar.add_cascade(label="OPML", menu=opmlmenu)
 
         root.config(menu=menubar)
@@ -258,21 +282,39 @@ class App(tk.Tk):
         bar = ttk.Frame(root)
         bar.pack(side="top", fill="x")
 
-        ttk.Button(bar, text="Ask", command=self._on_ask).pack(side="left", padx=4, pady=4)
-        ttk.Button(bar, text="Back", command=self._go_back).pack(side="left", padx=4, pady=4)
-        ttk.Button(bar, text="Open by ID", command=self._open_by_id).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Ask", command=self._on_ask).pack(
+            side="left", padx=4, pady=4
+        )
+        ttk.Button(bar, text="Back", command=self._go_back).pack(
+            side="left", padx=4, pady=4
+        )
+        ttk.Button(bar, text="Open by ID", command=self._open_by_id).pack(
+            side="left", padx=4, pady=4
+        )
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
 
-        ttk.Button(bar, text="Import Dir", command=self._import_directory).pack(side="left", padx=4, pady=4)
-        ttk.Button(bar, text="Open OPML", command=self._open_opml_from_file).pack(side="left", padx=4, pady=4)
-        ttk.Button(bar, text="Convert → OPML", command=self._convert_selection_to_opml).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Import Dir", command=self._import_directory).pack(
+            side="left", padx=4, pady=4
+        )
+        ttk.Button(bar, text="Open OPML", command=self._open_opml_from_file).pack(
+            side="left", padx=4, pady=4
+        )
+        ttk.Button(
+            bar, text="Convert → OPML", command=self._convert_selection_to_opml
+        ).pack(side="left", padx=4, pady=4)
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
 
-        ttk.Button(bar, text="Search", command=self._on_search_clicked).pack(side="left", padx=4, pady=4)
-        ttk.Button(bar, text="Reparse Links", command=self._reparse_links).pack(side="left", padx=4, pady=4)
-        ttk.Button(bar, text="Flask", command=self._export_and_launch_flask).pack(side="left", padx=4, pady=4)
+        ttk.Button(bar, text="Search", command=self._on_search_clicked).pack(
+            side="left", padx=4, pady=4
+        )
+        ttk.Button(bar, text="Reparse Links", command=self._reparse_links).pack(
+            side="left", padx=4, pady=4
+        )
+        ttk.Button(bar, text="Flask", command=self._export_and_launch_flask).pack(
+            side="left", padx=4, pady=4
+        )
 
         # Panes
         self.panes = ttk.Panedwindow(root, orient="horizontal")
@@ -280,7 +322,9 @@ class App(tk.Tk):
 
         # Left: index
         left = ttk.Frame(self.panes)
-        self.sidebar = ttk.Treeview(left, columns=("id", "title", "size"), show="headings", height=20)
+        self.sidebar = ttk.Treeview(
+            left, columns=("id", "title", "size"), show="headings", height=20
+        )
         self.sidebar.heading("id", text="ID")
         self.sidebar.heading("title", text="Title / Preview")
         self.sidebar.heading("size", text="Size")
@@ -292,7 +336,9 @@ class App(tk.Tk):
 
         left_bottom = ttk.Frame(left)
         left_bottom.pack(fill="x")
-        ttk.Button(left_bottom, text="Refresh", command=self._refresh_index).pack(side="left", padx=4, pady=4)
+        ttk.Button(left_bottom, text="Refresh", command=self._refresh_index).pack(
+            side="left", padx=4, pady=4
+        )
         self.panes.add(left, weight=1)
 
         # Right stack: Text pane + Image label + OPML tree
@@ -303,7 +349,9 @@ class App(tk.Tk):
         # Text mode widgets
         self.text_frame = ttk.Frame(self.right_stack)
         self.text = tk.Text(self.text_frame, wrap="word", undo=True)
-        yscroll = ttk.Scrollbar(self.text_frame, orient="vertical", command=self.text.yview)
+        yscroll = ttk.Scrollbar(
+            self.text_frame, orient="vertical", command=self.text.yview
+        )
         self.text.configure(yscrollcommand=yscroll.set)
         self.text.pack(side="top", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
@@ -319,7 +367,9 @@ class App(tk.Tk):
         # OPML Tree mode widgets
         self.tree_frame = ttk.Frame(self.right_stack)
         self.opml_tree = ttk.Treeview(self.tree_frame, show="tree")
-        tree_scroll = ttk.Scrollbar(self.tree_frame, orient="vertical", command=self.opml_tree.yview)
+        tree_scroll = ttk.Scrollbar(
+            self.tree_frame, orient="vertical", command=self.opml_tree.yview
+        )
         self.opml_tree.configure(yscrollcommand=tree_scroll.set)
         self.opml_tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="left", fill="y")
@@ -331,14 +381,20 @@ class App(tk.Tk):
 
         # Status
         self.status = tk.StringVar(value="Ready")
-        ttk.Label(root, textvariable=self.status, anchor="w").pack(side="bottom", fill="x")
+        ttk.Label(root, textvariable=self.status, anchor="w").pack(
+            side="bottom", fill="x"
+        )
 
         # Context menu
         self.context_menu = tk.Menu(root, tearoff=0)
         self.context_menu.add_command(label="Ask", command=self._on_ask)
-        self.context_menu.add_command(label="Export Current…", command=self._export_current)
+        self.context_menu.add_command(
+            label="Export Current…", command=self._export_current
+        )
         self.context_menu.add_separator()
-        self.context_menu.add_command(label="Save Visible Text…", command=self._save_visible_text)
+        self.context_menu.add_command(
+            label="Save Visible Text…", command=self._save_visible_text
+        )
 
         # Shortcuts
         root.bind_all("<Control-Return>", lambda e: self._on_ask())
@@ -423,20 +479,44 @@ class App(tk.Tk):
                 m = dict(row)
                 doc_id = m.get("id", m.get("doc_id", m.get("pk", None)))
                 title = str(m.get("title", m.get("name", "")) or "")
-                content = (m.get("content") or m.get("body") or m.get("text") or
-                           m.get("raw") or m.get("data") or m.get("value") or
-                           m.get("description") or "")
+                content = (
+                    m.get("content")
+                    or m.get("body")
+                    or m.get("text")
+                    or m.get("raw")
+                    or m.get("data")
+                    or m.get("value")
+                    or m.get("description")
+                    or ""
+                )
             elif isinstance(row, dict):
                 doc_id = row.get("id") or row.get("doc_id") or row.get("pk")
                 title = str(row.get("title", row.get("name", "")) or "")
-                content = (row.get("content") or row.get("body") or row.get("text") or
-                           row.get("raw") or row.get("data") or row.get("value") or
-                           row.get("description") or "")
+                content = (
+                    row.get("content")
+                    or row.get("body")
+                    or row.get("text")
+                    or row.get("raw")
+                    or row.get("data")
+                    or row.get("value")
+                    or row.get("description")
+                    or ""
+                )
             else:
                 # tuple/list
-                doc_id = row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else None
-                title = (row[1] if isinstance(row, (list, tuple)) and len(row) > 1 and isinstance(row[1], str) else "")
-                content = (row[2] if isinstance(row, (list, tuple)) and len(row) > 2 else "")
+                doc_id = (
+                    row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else None
+                )
+                title = (
+                    row[1]
+                    if isinstance(row, (list, tuple))
+                    and len(row) > 1
+                    and isinstance(row[1], str)
+                    else ""
+                )
+                content = (
+                    row[2] if isinstance(row, (list, tuple)) and len(row) > 2 else ""
+                )
 
             preview = _make_preview(title, content)
             size = self._approx_payload_size(content)
@@ -594,19 +674,27 @@ class App(tk.Tk):
                 try:
                     pil = Image.open(BytesIO(decoded))
                     self._set_img_label(pil)
-                    self.status.set(f"Viewing image (decoded from Base64 text): id={self.current_doc_id}, {_human_size(len(decoded))}")
+                    self.status.set(
+                        f"Viewing image (decoded from Base64 text): id={self.current_doc_id}, {_human_size(len(decoded))}"
+                    )
                     return
                 except Exception as e:
                     print("Base64 text image render failed:", e)
 
         # Try bytes that are Base64 text
-        if PIL_AVAILABLE and isinstance(content, (bytes, bytearray)) and _looks_like_b64_bytes(content):
+        if (
+            PIL_AVAILABLE
+            and isinstance(content, (bytes, bytearray))
+            and _looks_like_b64_bytes(content)
+        ):
             decoded = _decode_b64_bytes(content)
             if decoded:
                 try:
                     pil = Image.open(BytesIO(decoded))
                     self._set_img_label(pil)
-                    self.status.set(f"Viewing image (decoded from Base64 bytes): id={self.current_doc_id}, {_human_size(len(decoded))}")
+                    self.status.set(
+                        f"Viewing image (decoded from Base64 bytes): id={self.current_doc_id}, {_human_size(len(decoded))}"
+                    )
                     return
                 except Exception as e:
                     print("Base64 bytes image render failed:", e)
@@ -616,13 +704,23 @@ class App(tk.Tk):
             try:
                 pil = Image.open(BytesIO(content))
                 self._set_img_label(pil)
-                self.status.set(f"Viewing image (BLOB): id={self.current_doc_id}, {_human_size(len(content))}")
+                self.status.set(
+                    f"Viewing image (BLOB): id={self.current_doc_id}, {_human_size(len(content))}"
+                )
                 return
             except Exception as e:
                 print("BLOB image render failed:", e)
 
         # Fallback: textual content
-        display = content if isinstance(content, str) else (render_binary_as_text(content) if render_binary_as_text and isinstance(content, (bytes, bytearray)) else str(content))
+        display = (
+            content
+            if isinstance(content, str)
+            else (
+                render_binary_as_text(content)
+                if render_binary_as_text and isinstance(content, (bytes, bytearray))
+                else str(content)
+            )
+        )
         self.text.insert("1.0", display)
 
         # Parse links if available and content is textual
@@ -663,7 +761,7 @@ class App(tk.Tk):
         prefix = simpledialog.askstring(
             "ASK prefix",
             "Enter prefix (optional):",
-            initialvalue="Please expand on this: "
+            initialvalue="Please expand on this: ",
         )
         if prefix is None:
             return
@@ -715,19 +813,53 @@ class App(tk.Tk):
         self._open_doc_id(s)
 
     def _import_directory(self):
-        if not self.processor or not hasattr(self.processor, "import_directory"):
-            messagebox.showerror("Import", "CommandProcessor.import_directory unavailable.")
-            return
+        from pathlib import Path
+        # Try preferred module-based importer first
+        import_fn = None
+        try:
+            from modules import directory_import
+            import_fn = getattr(directory_import, "import_text_files_from_directory", None)
+        except Exception:
+            import_fn = None
+
         path = filedialog.askdirectory(title="Choose a directory to import")
         if not path:
             return
-        try:
-            added = self.processor.import_directory(path)
-        except Exception as e:
-            messagebox.showerror("Import", f"Import failed: {e}")
-            return
-        messagebox.showinfo("Import", f"Imported {added} documents.")
-        self._refresh_index()
+
+        if callable(import_fn):
+            try:
+                imported, skipped = import_fn(Path(path), self.doc_store, skip_existing=True)
+                messagebox.showinfo(
+                    "Directory Import",
+                    f"Imported {imported} file(s), skipped {skipped} existing."
+                )
+                self._refresh_index()
+                return
+            except Exception as e:
+                messagebox.showerror("Directory Import", f"Import failed: {e}")
+                return
+
+        # Fallback: try common CommandProcessor methods if the module isn't available
+        for name in ("import_directory", "import_dir", "import_from_directory"):
+            fn = getattr(self.processor, name, None)
+            if callable(fn):
+                try:
+                    try:
+                        added = fn(path)
+                    except TypeError:
+                        added = fn(directory=path)
+                    messagebox.showinfo("Directory Import", f"Imported {added}")
+                    self._refresh_index()
+                    return
+                except Exception as e:
+                    messagebox.showerror("Directory Import", f"Import failed: {e}")
+                    return
+
+        messagebox.showerror(
+            "Directory Import",
+            "No usable entrypoint found. Expected modules.directory_import.import_text_files_from_directory(...) "
+            "or a CommandProcessor import method."
+        )
 
     def _open_opml_from_file(self):
         # Prefer plugin flow when available
@@ -744,7 +876,7 @@ class App(tk.Tk):
         # Fallback: let user pick a file and call into processor with any of the common names
         filepath = filedialog.askopenfilename(
             title="Open OPML file",
-            filetypes=[("OPML files", "*.opml *.xml"), ("All files", "*.*")]
+            filetypes=[("OPML files", "*.opml *.xml"), ("All files", "*.*")],
         )
         if not filepath:
             return
@@ -761,7 +893,9 @@ class App(tk.Tk):
                 break
 
         if not func:
-            messagebox.showerror("OPML", "No OPML import function found in CommandProcessor.")
+            messagebox.showerror(
+                "OPML", "No OPML import function found in CommandProcessor."
+            )
             return
 
         try:
@@ -774,7 +908,10 @@ class App(tk.Tk):
 
     def _convert_selection_to_opml(self):
         if self._mode != "text":
-            messagebox.showinfo("Convert → OPML", "Switch to a text document and select text to convert.")
+            messagebox.showinfo(
+                "Convert → OPML",
+                "Switch to a text document and select text to convert.",
+            )
             return
 
         sel = self._get_selected_text()
@@ -804,7 +941,11 @@ class App(tk.Tk):
             out = filedialog.asksaveasfilename(
                 title="Save OPML",
                 defaultextension=".opml",
-                filetypes=[("OPML files", "*.opml"), ("XML files", "*.xml"), ("All files", "*.*")]
+                filetypes=[
+                    ("OPML files", "*.opml"),
+                    ("XML files", "*.xml"),
+                    ("All files", "*.*"),
+                ],
             )
             if not out:
                 return
@@ -816,7 +957,9 @@ class App(tk.Tk):
     def _reparse_links(self):
         """Re-run link parsing on the current Text widget content (text mode only)."""
         if self._mode != "text":
-            messagebox.showinfo("Reparse Links", "Not applicable for OPML outline view.")
+            messagebox.showinfo(
+                "Reparse Links", "Not applicable for OPML outline view."
+            )
             return
         if not parse_links:
             messagebox.showinfo("Reparse Links", "No link parser available.")
@@ -852,24 +995,52 @@ class App(tk.Tk):
                 m = dict(row)
                 doc_id = m.get("id", m.get("doc_id", m.get("pk", None)))
                 title = str(m.get("title", m.get("name", "")) or "")
-                content = (m.get("content") or m.get("body") or m.get("text") or
-                           m.get("raw") or m.get("data") or m.get("value") or
-                           m.get("description") or "")
+                content = (
+                    m.get("content")
+                    or m.get("body")
+                    or m.get("text")
+                    or m.get("raw")
+                    or m.get("data")
+                    or m.get("value")
+                    or m.get("description")
+                    or ""
+                )
             elif isinstance(row, dict):
                 doc_id = row.get("id") or row.get("doc_id") or row.get("pk")
                 title = str(row.get("title", row.get("name", "")) or "")
-                content = (row.get("content") or row.get("body") or row.get("text") or
-                           row.get("raw") or row.get("data") or row.get("value") or
-                           row.get("description") or "")
+                content = (
+                    row.get("content")
+                    or row.get("body")
+                    or row.get("text")
+                    or row.get("raw")
+                    or row.get("data")
+                    or row.get("value")
+                    or row.get("description")
+                    or ""
+                )
             else:
-                doc_id = row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else None
-                title = (row[1] if isinstance(row, (list, tuple)) and len(row) > 1 and isinstance(row[1], str) else "")
-                content = (row[2] if isinstance(row, (list, tuple)) and len(row) > 2 else "")
+                doc_id = (
+                    row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else None
+                )
+                title = (
+                    row[1]
+                    if isinstance(row, (list, tuple))
+                    and len(row) > 1
+                    and isinstance(row[1], str)
+                    else ""
+                )
+                content = (
+                    row[2] if isinstance(row, (list, tuple)) and len(row) > 2 else ""
+                )
 
             hay = (_make_preview(title, content) + "\n" + str(content)).lower()
             if ql in hay:
                 size = self._approx_payload_size(content)
-                self.sidebar.insert("", "end", values=(doc_id, _make_preview(title, content), _human_size(size)))
+                self.sidebar.insert(
+                    "",
+                    "end",
+                    values=(doc_id, _make_preview(title, content), _human_size(size)),
+                )
 
     def _save_visible_text(self):
         if self._mode != "text":
@@ -882,7 +1053,7 @@ class App(tk.Tk):
         out = filedialog.asksaveasfilename(
             title="Save Visible Text",
             defaultextension=".txt",
-            filetypes=[("Text", "*.txt"), ("All files", "*.*")]
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
         )
         if not out:
             return
@@ -890,7 +1061,9 @@ class App(tk.Tk):
         messagebox.showinfo("Saved", f"Saved to {out}")
 
     def _import_text_file(self):
-        path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        path = filedialog.askopenfilename(
+            title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")]
+        )
         if not path:
             return
         body = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -912,7 +1085,9 @@ class App(tk.Tk):
         title, content = _extract_title_content(doc)
 
         # Choose extension
-        if isinstance(content, (bytes, bytearray)) or _looks_like_b64_text(content if isinstance(content, str) else ""):
+        if isinstance(content, (bytes, bytearray)) or _looks_like_b64_text(
+            content if isinstance(content, str) else ""
+        ):
             default_ext = ".png"
             types = [("PNG image", "*.png"), ("All files", "*.*")]
         elif isinstance(content, str) and self._looks_like_opml(content):
@@ -923,8 +1098,12 @@ class App(tk.Tk):
             types = [("Text", "*.txt"), ("All files", "*.*")]
 
         default_name = f"document_{self.current_doc_id}{default_ext}"
-        out = filedialog.asksaveasfilename(title="Export Current", defaultextension=default_ext,
-                                           initialfile=default_name, filetypes=types)
+        out = filedialog.asksaveasfilename(
+            title="Export Current",
+            defaultextension=default_ext,
+            initialfile=default_name,
+            filetypes=types,
+        )
         if not out:
             return
 
@@ -950,9 +1129,14 @@ class App(tk.Tk):
         # export simple JSON docs (best-effort)
         try:
             import json
+
             if self.doc_store and hasattr(self.doc_store, "get_document_index"):
                 for row in self.doc_store.get_document_index() or []:
-                    doc_id = row.get("id") if isinstance(row, dict) else (row[0] if isinstance(row, (list, tuple)) else None)
+                    doc_id = (
+                        row.get("id")
+                        if isinstance(row, dict)
+                        else (row[0] if isinstance(row, (list, tuple)) else None)
+                    )
                     if doc_id is None:
                         continue
                     doc = self.doc_store.get_document(doc_id)
@@ -961,10 +1145,16 @@ class App(tk.Tk):
                     elif isinstance(doc, dict):
                         data = dict(doc)
                     elif isinstance(doc, (list, tuple)):
-                        data = {"id": doc[0] if len(doc) > 0 else None, "title": doc[1] if len(doc) > 1 else "", "body": doc[2] if len(doc) > 2 else ""}
+                        data = {
+                            "id": doc[0] if len(doc) > 0 else None,
+                            "title": doc[1] if len(doc) > 1 else "",
+                            "body": doc[2] if len(doc) > 2 else "",
+                        }
                     else:
                         data = {"id": doc_id, "title": "", "body": str(doc)}
-                    with open(export_path / f"{data.get('id')}.json", "w", encoding="utf-8") as f:
+                    with open(
+                        export_path / f"{data.get('id')}.json", "w", encoding="utf-8"
+                    ) as f:
                         json.dump(data, f, indent=2)
         except Exception as e:
             print("Export JSON failed:", e)
@@ -972,9 +1162,12 @@ class App(tk.Tk):
         # Launch Flask if present
         try:
             import subprocess, sys
+
             if flask_server_path.exists():
                 subprocess.Popen([sys.executable, str(flask_server_path)])
-                messagebox.showinfo("Server Started", "Flask server launched at http://127.0.0.1:5050")
+                messagebox.showinfo(
+                    "Server Started", "Flask server launched at http://127.0.0.1:5050"
+                )
             else:
                 messagebox.showwarning("Flask", "modules/flask_server.py not found.")
         except Exception as e:
@@ -983,23 +1176,27 @@ class App(tk.Tk):
     @staticmethod
     def _basic_text_to_opml(text: str) -> str:
         import html
+
         body = "\n".join(
             f'<outline text="{html.escape(line)}" />'
-            for line in text.splitlines() if line.strip()
+            for line in text.splitlines()
+            if line.strip()
         )
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<opml version="2.0">\n'
-            '  <head><title>Converted</title></head>\n'
-            '  <body>\n'
-            f'{body}\n'
-            '  </body>\n'
-            '</opml>\n'
+            "  <head><title>Converted</title></head>\n"
+            "  <body>\n"
+            f"{body}\n"
+            "  </body>\n"
+            "</opml>\n"
         )
+
 
 def main():
     app = App()
     app.mainloop()
+
 
 if __name__ == "__main__":
     main()
