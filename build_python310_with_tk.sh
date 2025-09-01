@@ -24,6 +24,7 @@ echo "🛠  Configuring build with tkinter support..."
 ./configure \
   --prefix="$INSTALL_DIR" \
   --enable-optimizations \
+  --enable-shared \
   CPPFLAGS="-I/usr/include" \
   LDFLAGS="-L$ARCH_LIB_DIR -ltk8.6 -ltcl8.6" \
   PKG_CONFIG_PATH="$ARCH_LIB_DIR/pkgconfig"
