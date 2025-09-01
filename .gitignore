@@ -46,3 +46,22 @@ build/
 mistral-token
 exported_docs/
 backup_exported_docs/
+# Secrets / local env
+*.key
+*.pem
+.env
+.env.*
+# App data
+storage/*.db
+storage/*.sqlite*
+*.db-*
+# Python cruft
+__pycache__/
+*.py[cod]
+*.egg-info/
+# Build outputs / OS junk
+build/
+dist/
+*.spec
+.DS_Store
+Thumbs.db
