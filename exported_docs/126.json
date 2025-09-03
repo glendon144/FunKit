@@ -1,0 +1,5 @@
+{
+  "id": 126,
+  "title": "funkit_standard",
+  "body": "# -*- mode: python ; coding: utf-8 -*-\n\n\na = Analysis(\n    ['main.py'],\n    pathex=[],\n    binaries=[],\n    datas=[],\n    hiddenimports=[],\n    hookspath=[],\n    hooksconfig={},\n    runtime_hooks=[],\n    excludes=['torch', 'torchvision', 'torchaudio', 'tensorflow', 'onnx', 'onnxruntime', 'numba', 'llvmlite', 'cv2', 'moviepy', 'matplotlib', 'pandas', 'pyarrow'],\n    noarchive=False,\n    optimize=0,\n)\npyz = PYZ(a.pure)\n\nexe = EXE(\n    pyz,\n    a.scripts,\n    [],\n    exclude_binaries=True,\n    name='funkit',\n    debug=False,\n    bootloader_ignore_signals=False,\n    strip=False,\n    upx=True,\n    console=True,\n    disable_windowed_traceback=False,\n    argv_emulation=False,\n    target_arch=None,\n    codesign_identity=None,\n    entitlements_file=None,\n)\ncoll = COLLECT(\n    exe,\n    a.binaries,\n    a.datas,\n    strip=False,\n    upx=True,\n    upx_exclude=[],\n    name='funkit',\n)\n"
+}

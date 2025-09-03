@@ -1,0 +1,5 @@
+{
+  "id": 114,
+  "title": "new_link_test",
+  "body": "import tkinter as tk, re\n\nroot = tk.Tk()\nt     = tk.Text(root, font=(\"Arial\", 14))\nt.pack()\n\ntext = \"Example [Click me](doc:42) end.\"\npat  = re.compile(r\"\\[([^\\]]+)\\]\\(doc:(\\d+)\\)\")\n\nidx = 0\nfor m in pat.finditer(text):\n    start, end  = m.span()\n    if start > idx:\n        t.insert(tk.END, text[idx:start])\n\n    link, doc = m.group(1), m.group(2)\n    tag       = f\"doc{doc}\"\n    pos0      = t.index(tk.END)\n    t.insert(tk.END, link)\n    pos1      = t.index(tk.END)\n\n    # configure loud colours\n    t.tag_add(tag, pos0, pos1)\n    t.tag_config(tag, foreground=\"#ff0000\", background=\"#ffff66\", underline=1)\n\n    # DEBUG: print exactly what Tk thinks\n    print(\"ranges:\", t.tag_ranges(tag),\n          \"fg:\", t.tag_cget(tag, \"foreground\"),\n          \"bg:\", t.tag_cget(tag, \"background\"),\n          \"ul:\", t.tag_cget(tag, \"underline\"))\n    idx = end\n\nif idx < len(text):\n    t.insert(tk.END, text[idx:])\n\nroot.mainloop()\n\n"
+}

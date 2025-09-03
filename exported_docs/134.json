@@ -1,0 +1,5 @@
+{
+  "id": 134,
+  "title": "set_model_id",
+  "body": "export PIKIT_MODEL_NAME=\"mistral-7b-instruct-v0.2.Q4_K_M.gguf\"\nexport PIKIT_OPENAI_BASE_URL=\"http://localhost:8080/v1\"\nexport PIKIT_OPENAI_API_KEY=\"sk-local\"\n\n"
+}

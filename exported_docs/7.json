@@ -1,0 +1,5 @@
+{
+  "id": 7,
+  "title": "CHANGELOG",
+  "body": "# Changelog\n\n## v1.31 \u2014 2025-08-23\n\n### Highlights\n- \u2705 Image rendering restored (Base64 + BLOB), with correct size reporting  \n- \u2705 OPML outline view (expand/collapse)  \n- \u2705 Sidebar previews + Size column  \n- \u2705 File menu & context menu restored (Import, Export, Save as Text, Flask)  \n- \u2705 ASK flow + green-link refresh  \n- \u2705 Reparse Links action  \n- \u2705 Window title shows `v1.31`\n\n### Acknowledgments\n- Core development and integration: **Glen** (glendon144@gmail.com)  \n- Consulting assistance: *DeepSeek v1.0* acting as a design/implementation consultant, alongside iterative AI support.\n\n---\n"
+}

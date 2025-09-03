@@ -1,0 +1,5 @@
+{
+  "id": 89,
+  "title": "friendly_ai_interface",
+  "body": "ross@Whitebook:~$ # 1) See what models LocalAI thinks are available\ncurl -s http://localhost:8080/v1/models | jq\n\n# 2) Try the smallest valid chat request with explicit max_tokens\ncurl -s http://localhost:8080/v1/chat/completions \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Authorization: Bearer sk-local\" \\\n  -d '{\n    \"model\": \"mistral-7b-instruct\",\n    \"max_tokens\": 128,\n    \"messages\": [{\"role\":\"user\",\"content\":\"Reply with the single word: OK\"}]\n  }' | jq\n\n# 3) Watch server logs while you click ASK in FunKit\ndocker logs -f localai\n{\n  \"object\": \"list\",\n  \"data\": [\n    {\n      \"id\": \"mistral-7b-instruct-v0.2.Q4_K_M.gguf\",\n      \"object\": \"model\"\n    }\n  ]\n}\n{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Bad Request\",\n    \"type\": \"\"\n  }\n}\npermission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.49/containers/localai/json\": dial unix /var/run/docker.sock: connect: permission denied\ngross@Whitebook:~$ \n\n\n"
+}

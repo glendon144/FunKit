@@ -1,0 +1,5 @@
+{
+  "id": 52,
+  "title": "change_timeout_code-fragment",
+  "body": "import os\n\nCONNECT_TIMEOUT = float(os.getenv(\"PIKIT_CONNECT_TIMEOUT\", \"10\"))\nREAD_TIMEOUT    = float(os.getenv(\"PIKIT_READ_TIMEOUT\", \"600\"))\n\n"
+}

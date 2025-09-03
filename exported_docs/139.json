@@ -1,0 +1,5 @@
+{
+  "id": 139,
+  "title": "sqlite_shell_access",
+  "body": "# Check if sqlite3 is installed\nwhich sqlite3\n\n# If it is installed, this will show you the path to the binary (e.g., /usr/bin/sqlite3)\n\n# To open your application's SQLite database:\nsqlite3 path/to/your/database.db\n\n# Example if your database file is called documents.db and located in your current directory:\nsqlite3 documents.db\n\n# Inside the shell, you can run commands like:\n.tables          -- list all tables\n.schema          -- show the schema of the database\nSELECT * FROM documents; -- view table contents\n\n# To exit the SQLite shell:\n.quit\n"
+}

@@ -1,0 +1,5 @@
+{
+  "id": 122,
+  "title": "funkit",
+  "body": "from pathlib import Path\nfrom modules.document_store import DocumentStore\nfrom modules.command_processor import CommandProcessor\nfrom modules.gui_tkinter import DemoKitGUI\nfrom modules.ai_interface import AIInterface\n\ndef main():\n    # Ensure the storage directory exists\n    Path(\"storage\").mkdir(parents=True, exist_ok=True)\n\n    # Initialize the document store\n    doc_store = DocumentStore(\"storage/documents.db\")\n\n    # Initialize the AI interface\n    ai = AIInterface()\n\n    # Initialize the command processor with doc store and AI\n    processor = CommandProcessor(doc_store, ai)\n\n    # Launch the GUI\n    app = DemoKitGUI(doc_store, processor)\n    app.mainloop()\n\nif __name__ == \"__main__\":\n    main()\n\n"
+}

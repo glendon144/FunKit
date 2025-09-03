@@ -1,0 +1,5 @@
+{
+  "id": 133,
+  "title": "set_baseten_api",
+  "body": "export BASETEN_API_KEY=`cat ~/openai.key`\n"
+}

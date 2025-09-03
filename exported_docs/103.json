@@ -1,0 +1,5 @@
+{
+  "id": 103,
+  "title": "link_test",
+  "body": "import tkinter as tk, re\n\ndef render(txt):\n    pattern = re.compile(r\"\\[([^\\]]+)\\]\\(doc:(\\d+)\\)\")\n    idx = 0\n    for m in pattern.finditer(txt):\n        start, end = m.span()\n        if start > idx:\n            t.insert(tk.END, txt[idx:start])\n        link, doc = m.group(1), m.group(2)\n        tag = f\"doc{doc}\"\n        pos0 = t.index(tk.END)\n        t.insert(tk.END, link)\n        pos1 = t.index(tk.END)\n        t.tag_add(tag, pos0, pos1)\n        t.tag_config(tag, foreground=\"#ff0000\", background=\"#ffff66\", underline=1)\n        idx = end\n    if idx < len(txt):\n        t.insert(tk.END, txt[idx:])\n\nroot = tk.Tk()\nt = tk.Text(root, font=(\"Arial\", 12))\nt.pack()\nrender(\"Example [Click me](doc:42) end.\")\nroot.mainloop()\n\n"
+}

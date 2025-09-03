@@ -1,0 +1,5 @@
+{
+  "id": 39,
+  "title": "add_test_doc",
+  "body": "from modules.document_store import DocumentStore\n\nstore = DocumentStore(\"storage/documents.db\")\nstore.add_document(\"Welcome\", \"This is a test document to verify the GUI works.\")\nstore.close()\n\n"
+}

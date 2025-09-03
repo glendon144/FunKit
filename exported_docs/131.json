@@ -1,0 +1,5 @@
+{
+  "id": 131,
+  "title": "run",
+  "body": "#!/bin/bash\n\n# Get the absolute path of the directory this script lives in\nPROJECT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nVENV_DIR=\"$PROJECT_DIR/funkit-env\"\nPYTHON_BIN=\"$VENV_DIR/bin/python\"\nENTRYPOINT=\"$PROJECT_DIR/main.py\"\n\n# Check that the virtualenv exists\nif [ ! -x \"$PYTHON_BIN\" ]; then\n  echo \"\u274c Virtual environment not found at $PYTHON_BIN\"\n  echo \"Create one with: python3.13 -m venv funkit-env\"\n  exit 1\nfi\n\n# Check that the entrypoint exists\nif [ ! -f \"$ENTRYPOINT\" ]; then\n  echo \"\u274c Could not find entrypoint: $ENTRYPOINT\"\n  exit 1\nfi\n\n# Show which Python is running\necho \"\u2705 Running with: $($PYTHON_BIN --version)\"\n\n# Launch the application\n\"$PYTHON_BIN\" \"$ENTRYPOINT\"\n\n"
+}

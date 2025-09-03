@@ -1,0 +1,5 @@
+{
+  "id": 83,
+  "title": "fix_sqlite_column",
+  "body": "-- This script will help you debug and fix the missing `id` column in the documents table\n-- Please review your schema creation logic or run the following fix manually if needed\n\n-- Check the structure of your current documents table\nPRAGMA table_info(documents);\n\n-- If the `id` column is missing, recreate the table properly (backup data first)\n\n-- Step 1: Rename old table\nALTER TABLE documents RENAME TO documents_old;\n\n-- Step 2: Create new table with correct schema\nCREATE TABLE documents (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    title TEXT NOT NULL,\n    body TEXT NOT NULL\n);\n\n-- Step 3: Copy data back\nINSERT INTO documents (title, body)\nSELECT title, body FROM documents_old;\n\n-- Step 4: Drop old table\nDROP TABLE documents_old;\n\n-- Now the documents table should include an `id` column and be compatible with your app\n"
+}

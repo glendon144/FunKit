@@ -1,0 +1,5 @@
+{
+  "id": 138,
+  "title": "space_saver",
+  "body": "#!/usr/bin/env python3\nimport os\nimport sqlite3\n\nDB_PATH = \"storage/documents.db\"\n\ndef get_file_size(path):\n    return os.path.getsize(path) / (1024 * 1024)\n\ndef vacuum_database(path):\n    print(f\"\ud83d\udd0d Opening database: {path}\")\n    size_before = get_file_size(path)\n    print(f\"\ud83d\udcbe Size before VACUUM: {size_before:.2f} MB\")\n\n    with sqlite3.connect(path) as conn:\n        conn.execute(\"VACUUM;\")\n        conn.commit()\n\n    size_after = get_file_size(path)\n    print(f\"\u2705 Size after VACUUM: {size_after:.2f} MB\")\n    print(f\"\ud83d\udca1 Saved: {size_before - size_after:.2f} MB\")\n\nif __name__ == \"__main__\":\n    if os.path.exists(DB_PATH):\n        vacuum_database(DB_PATH)\n    else:\n        print(f\"\u274c Database not found at: {DB_PATH}\")\n\n"
+}

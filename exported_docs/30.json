@@ -1,0 +1,5 @@
+{
+  "id": 30,
+  "title": "README-DB",
+  "body": "\n---\n\n### Sample database\n\nI generated a tiny SQLite DB with three demo documents.  \nPlace it at `storage/documents.db` or open it with any SQLite viewer.\n\n[Download `sample_documents.db`](sandbox:/mnt/data/sample_documents.db)\n\n---\n\n### Next steps\n\n* **README.md** \u2013 copy the markdown above into a new `README.md`, tweak as you like, commit.  \n* **Sample DB** \u2013 add `storage/sample_documents.db` (or keep the link in releases).  \n* Push both:\n\n```bash\ngit add README.md storage/sample_documents.db\ngit commit -m \"Add README and sample_documents.db\"\ngit push origin main\n\n"
+}

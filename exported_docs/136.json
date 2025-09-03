@@ -1,0 +1,5 @@
+{
+  "id": 136,
+  "title": "setup",
+  "body": "#!/usr/bin/env bash\nset -e\n\n# Install system dependencies (WSL/Ubuntu 22.04)\nsudo apt update\nsudo apt install -y build-essential python3-dev libatlas-base-dev gfortran\n\n# Create & activate virtualenv\npython3 -m venv .venv\nsource .venv/bin/activate\n\n# Upgrade pip, setuptools, wheel\npip install --upgrade pip setuptools wheel\n\n# Install Python dependencies\npip install numpy pandas pyserial tk\n\necho \"Setup complete! Virtualenv is active. To start working, run 'source .venv/bin/activate'.\"\n"
+}

@@ -1,0 +1,5 @@
+{
+  "id": 135,
+  "title": "setenv-mac",
+  "body": "export PATH=\"/opt/homebrew/bin:$PATH\"\nexport LDFLAGS=\"-L/opt/homebrew/opt/tcl-tk/lib\"\nexport CPPFLAGS=\"-I/opt/homebrew/opt/tcl-tk/include\"\nexport PKG_CONFIG_PATH=\"/opt/homebrew/opt/tcl-tk/lib/pkgconfig\"\nexport TCL_LIBRARY=\"/opt/homebrew/opt/tcl-tk/lib\"\nexport TK_LIBRARY=\"/opt/homebrew/opt/tcl-tk/lib\"\n\n"
+}

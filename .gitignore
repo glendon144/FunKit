@@ -1,0 +1,26 @@
+__pycache__/
+# Add rules (idempotent)
+grep -qxF 'storage/*.db*' .gitignore || echo 'storage/*.db*' >> .gitignore
+grep -qxF '*.db'          .gitignore || echo '*.db'          >> .gitignore
+grep -qxF '*.db-*'        .gitignore || echo '*.db-*'        >> .gitignore
+grep -qxF '*.sqlite*'     .gitignore || echo '*.sqlite*'     >> .gitignore
+
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.*
+.venv/
+venv/
+dist/
+build/
+*.log
+.DS_Store
+FunKit-WORKDIR-backup.tgz
+*.tgz
+*.tar
+*.tar.gz
+*.zip
+*.db
+*.sqlite*
+storage/*.db*

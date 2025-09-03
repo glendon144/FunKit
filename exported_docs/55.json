@@ -1,0 +1,5 @@
+{
+  "id": 55,
+  "title": "clicktest",
+  "body": "import tkinter as tk\n\nroot = tk.Tk()\ntxt = tk.Text(root)\ntxt.pack()\ntxt.insert(\"1.0\", \"This is a link: \")\ntxt.insert(tk.END, \"test\")\ntxt.tag_add(\"mylink\", \"1.16\", \"1.20\")\ntxt.tag_config(\"mylink\", foreground=\"blue\", underline=1, cursor=\"hand2\")\ntxt.tag_bind(\"mylink\", \"<Button-1>\", lambda e: print(\"clicked!\"))\nroot.mainloop()\n\n"
+}

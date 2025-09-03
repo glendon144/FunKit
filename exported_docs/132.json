@@ -1,0 +1,5 @@
+{
+  "id": 132,
+  "title": "run",
+  "body": "#!/bin/bash\n\n# Adjust this if your project lives elsewhere\nPROJECT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nVENV_DIR=\"$PROJECT_DIR/funkit-env\"\nPYTHON_BIN=\"$VENV_DIR/bin/python\"\n\n# Sanity check\nif [ ! -x \"$PYTHON_BIN\" ]; then\n  echo \"\u274c Python virtualenv not found at $PYTHON_BIN\"\n  echo \"Make sure to create it with:\"\n  echo \"  python3.13 -m venv funkit-env\"\n  exit 1\nfi\n\n# Optional: Print Python version\necho \"\u2705 Using Python: $($PYTHON_BIN --version)\"\n\n# Launch your GUI app\n\"$PYTHON_BIN\" \"$PROJECT_DIR/main.py\"\n\n"
+}

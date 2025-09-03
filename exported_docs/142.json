@@ -1,0 +1,5 @@
+{
+  "id": 142,
+  "title": "start_funkit_secure",
+  "body": "\n\n\n\n\n#!/usr/bin/env bash\nset -Eeuo pipefail\nexport PIKIT_OPENAI_BASE_URL=\"http://localhost:8081/v1\"\nexport PIKIT_OPENAI_API_KEY=\"funkit-local\"\nexport PIKIT_MODEL_NAME=\"mistral-7b-instruct\"\nexport PIKIT_MAX_TOKENS_DEFAULT=256\nexport PIKIT_REQUEST_TIMEOUT=600\nexport PIKIT_DEBUG=1\n\n# Show what the adapter sees\npython3 - <<'PY'\nimport os, sys, json\nsys.path.insert(0, os.path.abspath('modules'))\nfrom ai_interface import AIInterface\nai = AIInterface()\nprint(\">>> ADAPTER CONFIG\", json.dumps(ai.get_config(), indent=2))\nPY\n\nexec python3 main.py\n\n"
+}

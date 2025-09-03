@@ -1,0 +1,5 @@
+{
+  "id": 125,
+  "title": "funkit_settings",
+  "body": "{\n  \"geometry\": \"1200x903+35+15\",\n  \"opml_expand_depth\": 2,\n  \"sidebar_width\": 320,\n  \"recent_docs\": [],\n  \"memory\": {},\n  \"theme\": \"light\"\n}"
+}

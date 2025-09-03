@@ -1,0 +1,5 @@
+{
+  "id": 2,
+  "title": ".gitignore",
+  "body": "# OS / editor junk\n.DS_Store\nThumbs.db\n*.swp\n\n# Python artefacts\n*.pyc\n__pycache__/\n# local docs\n\nexported_docs/\nbackup_exported_docs/\n\n\n# Virtual-envs\nvenv/\nmyenv*/\nfunkit-env/\n.env/\n\n# Local binaries / wheels\n*.whl\n*.pyd\n# build directories\ndist/\nbuild/\n# Databases & cache\nstorage/*.db\n\n# Secrets\ncredentials/\n\nexported_docs/docs.json\nexported_docs\nopenai.key\nexported_docs/\nOpenAI.key\ndocument_*.txt\n*.patch\n*.bak\n*.new\n*.diff\nfb_*token.txt\ndist/\nbuild/\nmistral-token\nexported_docs/\nbackup_exported_docs/\n"
+}

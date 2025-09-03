@@ -1,0 +1,5 @@
+{
+  "id": 121,
+  "title": "funkit-large",
+  "body": "# -*- mode: python ; coding: utf-8 -*-\n\n\na = Analysis(\n    ['main.py'],\n    pathex=[],\n    binaries=[],\n    datas=[],\n    hiddenimports=[],\n    hookspath=[],\n    hooksconfig={},\n    runtime_hooks=[],\n    excludes=[],\n    noarchive=False,\n    optimize=0,\n)\npyz = PYZ(a.pure)\n\nexe = EXE(\n    pyz,\n    a.scripts,\n    a.binaries,\n    a.datas,\n    [],\n    name='funkit',\n    debug=False,\n    bootloader_ignore_signals=False,\n    strip=False,\n    upx=True,\n    upx_exclude=[],\n    runtime_tmpdir=None,\n    console=True,\n    disable_windowed_traceback=False,\n    argv_emulation=False,\n    target_arch=None,\n    codesign_identity=None,\n    entitlements_file=None,\n)\n"
+}

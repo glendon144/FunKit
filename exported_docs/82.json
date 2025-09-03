@@ -1,0 +1,5 @@
+{
+  "id": 82,
+  "title": "export_html_to_opml_patch",
+  "body": "urls_text = SD.askstring(\"URL \u2192 OPML\", \"Enter URL(s) separated by spaces, commas, or newlines:\")\nif not urls_text:\n    return\n\nimport re\ntokens = re.split(r'[,\\s;]+', urls_text.strip())\nurls = []\nfor t in tokens:\n    if not t:\n        continue\n    u = t.strip(' <>\\\"\\'()[]')\n    # Add scheme if missing\n    if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.\\-]*://', u):\n        u = \"https://\" + u\n    urls.append(u)\n\n# de-dup while preserving order\nurls = list(dict.fromkeys(urls))\nif not urls:\n    return\n"
+}

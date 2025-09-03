@@ -1,0 +1,5 @@
+{
+  "id": 145,
+  "title": "test-add",
+  "body": "# Temporary block to add a test doc if store is empty\nif not store.list_documents():\n    store.new_document(\"Welcome\", \"This is a sample document to get started.\")\n\n"
+}

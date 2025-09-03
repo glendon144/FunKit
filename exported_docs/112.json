@@ -1,0 +1,5 @@
+{
+  "id": 112,
+  "title": "mistral_chat",
+  "body": "mistral-chat $HOME/localai/models/7B-Instruct-v0.2 --instruct --max_tokens 256\n"
+}

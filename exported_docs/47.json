@@ -1,0 +1,5 @@
+{
+  "id": 47,
+  "title": "build_funkit",
+  "body": "#!/bin/bash\n\nset -e\n\necho \"\ud83d\udd04 Cleaning old build artifacts...\"\nrm -rf build dist __pycache__ *.spec\n\necho \"\ud83d\udcc2 Ensuring required folders exist...\"\nmkdir -p exported_docs\nmkdir -p storage\ntouch exported_docs/.placeholder\ntouch storage/.placeholder\n\necho \"\ud83d\udee0\ufe0f Building lite version...\"\npyinstaller --onefile --name funkit-lite main.py\n\necho \"\ud83d\udce6 Size of lite binary:\"\ndu -sh dist/funkit-lite\n\necho \"\u26a1 Launch timing for lite binary:\"\nSTART=$(date +%s.%N)\n./dist/funkit-lite --help >/dev/null 2>&1 || true\nEND=$(date +%s.%N)\necho \"\u23f1\ufe0f  Lite version launch time: $(echo \"$END - $START\" | bc) seconds\"\n\necho\necho \"\u2705 Done. Binaries are in: $(realpath dist)\"\n\n"
+}

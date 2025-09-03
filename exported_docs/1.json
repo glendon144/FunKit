@@ -1,0 +1,5 @@
+{
+  "id": 1,
+  "title": ".gitattributes",
+  "body": "*.psd filter=lfs diff=lfs merge=lfs -text\n"
+}
