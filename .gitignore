@@ -1,0 +1,9 @@
+dist/
+build/
+*.db
+*.sqlite
+*.sqlite3
+storage/*.db
+dist/storage/*.db
+__pycache__/
+*.pyc
