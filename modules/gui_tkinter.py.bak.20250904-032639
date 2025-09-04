@@ -309,10 +309,6 @@ class DemoKitGUI(tk.Tk):
     SIDEBAR_WIDTH = 320
 
     def __init__(self, doc_store, processor):
-        try: self.bind("<Control-Shift-I>", self._on_import_images_clicked)
-        except Exception: pass
-        try: self.bind("<Control-Shift-E>", self._export_current_images_aware)
-        except Exception: pass
         super().__init__()
         self.doc_store = doc_store
         self.processor = processor
@@ -382,11 +378,6 @@ class DemoKitGUI(tk.Tk):
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
-        try:
-            filemenu.add_command(label="Import Images...", command=self._on_import_images_clicked)
-            filemenu.add_command(label="Export Image...", command=self._export_current_images_aware)
-        except Exception:
-            pass
 
         # View menu (Tree + OPML depth)
         viewmenu = tk.Menu(menubar, tearoff=0)
@@ -1606,148 +1597,6 @@ class DemoKitGUI(tk.Tk):
         if hdr.startswith(b"BM"): return "image/bmp"
         if len(hdr) >= 12 and hdr[0:4] == b"RIFF" and hdr[8:12] == b"WEBP": return "image/webp"
         return None
-
-    def _filetypes_images_first(self):
-        return [
-            ("Images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-            ("Text files", "*.txt *.md *.opml *.xml *.html *.htm *.json"),
-            ("All files", "*.*"),
-        ]
-
-    def _data_url_from_path(self, path):
-        from pathlib import Path
-        p = Path(path)
-        b = p.read_bytes()
-        import mimetypes
-        mt, _ = mimetypes.guess_type(p.name)
-        if not mt or not mt.startswith("image/"):
-            if b.startswith(b"\x89PNG\r\n\x1a\n"):
-                mt = "image/png"
-            elif b.startswith(b"\xff\xd8"):
-                mt = "image/jpeg"
-            elif b.startswith(b"GIF87a") or b.startswith(b"GIF89a"):
-                mt = "image/gif"
-            elif b.startswith(b"BM"):
-                mt = "image/bmp"
-            elif len(b) >= 12 and b[0:4] == b"RIFF" and b[8:12] == b"WEBP":
-                mt = "image/webp"
-            else:
-                mt = "application/octet-stream"
-        import base64
-        return "data:" + mt + ";base64," + base64.b64encode(b).decode("ascii")
-
-    def _export_current_images_aware(self, event=None):
-        """Export current doc; if body is data:image;base64, write real bytes."""
-        body = None
-        try:
-            if hasattr(self, "get_current_body") and callable(getattr(self, "get_current_body")):
-                body = self.get_current_body()
-            elif hasattr(self, "text"):
-                body = self.text.get("1.0", "end-1c")
-        except Exception:
-            body = None
-        if not isinstance(body, str) or not body.startswith("data:image/"):
-            if hasattr(self, "_on_export_clicked"):
-                try:
-                    return self._on_export_clicked()
-                except Exception:
-                    pass
-            return
-        import re, base64
-        m = re.match(r"^data:(image/[A-Za-z0-9.+-]+);base64,(.*)$", body, re.S)
-        if not m:
-            if hasattr(self, "_on_export_clicked"):
-                try:
-                    return self._on_export_clicked()
-                except Exception:
-                    pass
-            return
-        mime, b64 = m.groups()
-        extmap = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/bmp": ".bmp", "image/webp": ".webp"}
-        ext = extmap.get(mime, ".bin")
-        from tkinter import filedialog, messagebox
-        fn = filedialog.asksaveasfilename(defaultextension=ext, filetypes=[("All files", "*.*")])
-        if not fn:
-            return
-        try:
-            with open(fn, "wb") as f:
-                f.write(base64.b64decode(b64))
-            try:
-                messagebox.showinfo("Export", "Saved: " + str(fn))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _on_import_images_clicked(self, event=None):
-        from tkinter import filedialog, messagebox
-        paths = filedialog.askopenfilenames(
-            title="Import Images...",
-            filetypes=self._filetypes_images_first()
-        )
-        if not paths:
-            return
-        created = []
-        for path in paths:
-            try:
-                body = self._data_url_from_path(path)
-                try:
-                    from pathlib import Path as _P
-                    title = _P(path).name
-                except Exception:
-                    title = "image"
-                doc_id = None
-                # GUI helpers
-                for name in ("create_document","new_document","add_document_here"):
-                    fn = getattr(self, name, None)
-                    if callable(fn):
-                        try:
-                            doc_id = fn(title, body); break
-                        except TypeError:
-                            try:
-                                doc_id = fn({'title': title, 'body': body}); break
-                            except Exception:
-                                pass
-                if doc_id is None:
-                    try:
-                        from modules import document_store as _ds
-                        for name in ("create_document","add_document","insert_document","new_document","create","add"):
-                            fn = getattr(_ds, name, None)
-                            if callable(fn):
-                                try:
-                                    doc_id = fn(title, body); break
-                                except TypeError:
-                                    try:
-                                        doc_id = fn({'title': title, 'body': body}); break
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-                if doc_id is not None:
-                    created.append(doc_id)
-            except Exception:
-                continue
-        if created:
-            last_id = created[-1]
-            try:
-                messagebox.showinfo("Import", "Document " + str(last_id) + " created")
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "reload_index"):
-                    self.reload_index()
-                tree = getattr(self, "tree", None)
-                if tree:
-                    for it in tree.get_children(""):
-                        vals = tree.item(it, "values")
-                        if vals and str(vals[0]) == str(last_id):
-                            tree.selection_set(it); tree.see(it)
-                            if hasattr(self, "open_doc_by_id"):
-                                self.open_doc_by_id(last_id)
-                            break
-            except Exception:
-                pass
-
 
 
 

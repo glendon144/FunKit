@@ -1,5 +1,4 @@
 from modules.provider_registry import registry
-import mimetypes
 from modules.provider_dropdown import ProviderDropdown
 import os
 import threading
@@ -309,10 +308,6 @@ class DemoKitGUI(tk.Tk):
     SIDEBAR_WIDTH = 320
 
     def __init__(self, doc_store, processor):
-        try: self.bind("<Control-Shift-I>", self._on_import_images_clicked)
-        except Exception: pass
-        try: self.bind("<Control-Shift-E>", self._export_current_images_aware)
-        except Exception: pass
         super().__init__()
         self.doc_store = doc_store
         self.processor = processor
@@ -382,11 +377,6 @@ class DemoKitGUI(tk.Tk):
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
-        try:
-            filemenu.add_command(label="Import Images...", command=self._on_import_images_clicked)
-            filemenu.add_command(label="Export Image...", command=self._export_current_images_aware)
-        except Exception:
-            pass
 
         # View menu (Tree + OPML depth)
         viewmenu = tk.Menu(menubar, tearoff=0)
@@ -1157,24 +1147,7 @@ class DemoKitGUI(tk.Tk):
         path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
         if not path:
             return
-        # Read as UTF-8 text, or fallback to data:image;base64 for images
-        try:
-            body = Path(path).read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            b = Path(path).read_bytes()
-            mime = self._sniff_image_bytes(b)
-            if mime is None:
-                # Secondary guess by extension
-                import mimetypes as _mt
-                mt, _ = _mt.guess_type(str(path))
-                if mt and mt.startswith("image/"): mime = mt
-            if mime:
-                import base64 as _b64
-                body = f"data:{mime};base64,{_b64.b64encode(b).decode('ascii')}"
-            else:
-                # Non-image binary: re-raise to keep prior behavior/logging
-                raise
-
+        body = Path(path).read_text(encoding="utf-8")
         title = Path(path).stem
         nid = self.doc_store.add_document(title, body)
         self.logger.info(f"Imported {nid}")
@@ -1182,66 +1155,6 @@ class DemoKitGUI(tk.Tk):
         doc = self.doc_store.get_document(nid)
         if doc:
             self._render_document(doc)
-        # Fast-path: if we produced a data-URL image, create a doc now and return
-        if isinstance(body, str) and body.startswith('data:image/'):
-            _doc_id = None
-            _title = None
-            try:
-                from pathlib import Path as _P
-                _title = _P(path).name
-            except Exception:
-                _title = 'image'
-            # Try GUI helpers first
-            for _name in ('create_document','new_document','add_document_here'):
-                _fn = getattr(self, _name, None)
-                if callable(_fn):
-                    try:
-                        _doc_id = _fn(_title, body)
-                        break
-                    except TypeError:
-                        try:
-                            _doc_id = _fn({'title': _title, 'body': body})
-                            break
-                        except Exception:
-                            pass
-            # Then document_store fallbacks
-            if _doc_id is None:
-                try:
-                    from modules import document_store as _ds
-                    for _name in ('create_document','add_document','insert_document','new_document','create','add'):
-                        _fn = getattr(_ds, _name, None)
-                        if callable(_fn):
-                            try:
-                                _doc_id = _fn(_title, body)
-                                break
-                            except TypeError:
-                                try:
-                                    _doc_id = _fn({'title': _title, 'body': body})
-                                    break
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
-            if _doc_id is not None:
-                try:
-                    from tkinter import messagebox as _mb
-                    _mb.showinfo('Import', f'Document {_doc_id} created')
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'reload_index'): self.reload_index()
-                    _tree = getattr(self, 'tree', None)
-                    if _tree:
-                        for _it in _tree.get_children(''):
-                            _vals = _tree.item(_it, 'values')
-                            if _vals and str(_vals[0]) == str(_doc_id):
-                                _tree.selection_set(_it)
-                                _tree.see(_it)
-                                if hasattr(self, 'open_doc_by_id'): self.open_doc_by_id(_doc_id)
-                                break
-                except Exception:
-                    pass
-                return
 
     def _export_doc(self):
         if getattr(self, "current_doc_id", None) is None:
@@ -1595,161 +1508,6 @@ class DemoKitGUI(tk.Tk):
         self._image_enlarged = False
         messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
 
-    def _sniff_image_bytes(self, b):
-        """Return image MIME type if bytes match a known format, else None."""
-        if not isinstance(b, (bytes, bytearray)):
-            return None
-        hdr = bytes(b[:12])
-        if hdr.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
-        if hdr.startswith(b"\xff\xd8"): return "image/jpeg"
-        if hdr.startswith(b"GIF87a") or hdr.startswith(b"GIF89a"): return "image/gif"
-        if hdr.startswith(b"BM"): return "image/bmp"
-        if len(hdr) >= 12 and hdr[0:4] == b"RIFF" and hdr[8:12] == b"WEBP": return "image/webp"
-        return None
-
-    def _filetypes_images_first(self):
-        return [
-            ("Images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-            ("Text files", "*.txt *.md *.opml *.xml *.html *.htm *.json"),
-            ("All files", "*.*"),
-        ]
-
-    def _data_url_from_path(self, path):
-        from pathlib import Path
-        p = Path(path)
-        b = p.read_bytes()
-        import mimetypes
-        mt, _ = mimetypes.guess_type(p.name)
-        if not mt or not mt.startswith("image/"):
-            if b.startswith(b"\x89PNG\r\n\x1a\n"):
-                mt = "image/png"
-            elif b.startswith(b"\xff\xd8"):
-                mt = "image/jpeg"
-            elif b.startswith(b"GIF87a") or b.startswith(b"GIF89a"):
-                mt = "image/gif"
-            elif b.startswith(b"BM"):
-                mt = "image/bmp"
-            elif len(b) >= 12 and b[0:4] == b"RIFF" and b[8:12] == b"WEBP":
-                mt = "image/webp"
-            else:
-                mt = "application/octet-stream"
-        import base64
-        return "data:" + mt + ";base64," + base64.b64encode(b).decode("ascii")
-
-    def _export_current_images_aware(self, event=None):
-        """Export current doc; if body is data:image;base64, write real bytes."""
-        body = None
-        try:
-            if hasattr(self, "get_current_body") and callable(getattr(self, "get_current_body")):
-                body = self.get_current_body()
-            elif hasattr(self, "text"):
-                body = self.text.get("1.0", "end-1c")
-        except Exception:
-            body = None
-        if not isinstance(body, str) or not body.startswith("data:image/"):
-            if hasattr(self, "_on_export_clicked"):
-                try:
-                    return self._on_export_clicked()
-                except Exception:
-                    pass
-            return
-        import re, base64
-        m = re.match(r"^data:(image/[A-Za-z0-9.+-]+);base64,(.*)$", body, re.S)
-        if not m:
-            if hasattr(self, "_on_export_clicked"):
-                try:
-                    return self._on_export_clicked()
-                except Exception:
-                    pass
-            return
-        mime, b64 = m.groups()
-        extmap = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/bmp": ".bmp", "image/webp": ".webp"}
-        ext = extmap.get(mime, ".bin")
-        from tkinter import filedialog, messagebox
-        fn = filedialog.asksaveasfilename(defaultextension=ext, filetypes=[("All files", "*.*")])
-        if not fn:
-            return
-        try:
-            with open(fn, "wb") as f:
-                f.write(base64.b64decode(b64))
-            try:
-                messagebox.showinfo("Export", "Saved: " + str(fn))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _on_import_images_clicked(self, event=None):
-        from tkinter import filedialog, messagebox
-        paths = filedialog.askopenfilenames(
-            title="Import Images...",
-            filetypes=self._filetypes_images_first()
-        )
-        if not paths:
-            return
-        created = []
-        for path in paths:
-            try:
-                body = self._data_url_from_path(path)
-                try:
-                    from pathlib import Path as _P
-                    title = _P(path).name
-                except Exception:
-                    title = "image"
-                doc_id = None
-                # GUI helpers
-                for name in ("create_document","new_document","add_document_here"):
-                    fn = getattr(self, name, None)
-                    if callable(fn):
-                        try:
-                            doc_id = fn(title, body); break
-                        except TypeError:
-                            try:
-                                doc_id = fn({'title': title, 'body': body}); break
-                            except Exception:
-                                pass
-                if doc_id is None:
-                    try:
-                        from modules import document_store as _ds
-                        for name in ("create_document","add_document","insert_document","new_document","create","add"):
-                            fn = getattr(_ds, name, None)
-                            if callable(fn):
-                                try:
-                                    doc_id = fn(title, body); break
-                                except TypeError:
-                                    try:
-                                        doc_id = fn({'title': title, 'body': body}); break
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-                if doc_id is not None:
-                    created.append(doc_id)
-            except Exception:
-                continue
-        if created:
-            last_id = created[-1]
-            try:
-                messagebox.showinfo("Import", "Document " + str(last_id) + " created")
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "reload_index"):
-                    self.reload_index()
-                tree = getattr(self, "tree", None)
-                if tree:
-                    for it in tree.get_children(""):
-                        vals = tree.item(it, "values")
-                        if vals and str(vals[0]) == str(last_id):
-                            tree.selection_set(it); tree.see(it)
-                            if hasattr(self, "open_doc_by_id"):
-                                self.open_doc_by_id(last_id)
-                            break
-            except Exception:
-                pass
-
-
-
 
 def sanitize_doc(doc):
     if isinstance(doc["body"], bytes):
@@ -1759,57 +1517,4 @@ def sanitize_doc(doc):
             doc["body"] = doc["body"].decode("utf-8", errors="replace")
     return doc
 
-def _sniff_image_bytes(self, b: bytes) -> str | None:
-
-
-    if b.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
-
-
-    if b.startswith(b"\xff\xd8"): return "image/jpeg"
-
-
-    if b.startswith(b"GIF87a") or b.startswith(b"GIF89a"): return "image/gif"
-
-
-    if b.startswith(b"BM"): return "image/bmp"
-
-
-    if len(b) >= 12 and b[0:4] == b"RIFF" and b[8:12] == b"WEBP": return "image/webp"
-
-
-    return None
-
-
-
-    def _sniff_image_bytes(self, b):
-
-
-        """Return image MIME type if bytes match a known format, else None."""
-
-
-        if not isinstance(b, (bytes, bytearray)):
-
-
-            return None
-
-
-        hdr = bytes(b[:12])
-
-
-        if hdr.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
-
-
-        if hdr.startswith(b"\xff\xd8"): return "image/jpeg"
-
-
-        if hdr.startswith(b"GIF87a") or hdr.startswith(b"GIF89a"): return "image/gif"
-
-
-        if hdr.startswith(b"BM"): return "image/bmp"
-
-
-        if len(hdr) >= 12 and hdr[0:4] == b"RIFF" and hdr[8:12] == b"WEBP": return "image/webp"
-
-
-        return None
 
