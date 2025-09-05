@@ -190,8 +190,19 @@ class _MiniHTMLHeadingParser:
                     self._in_h = None
                     self._buf.clear()
 
+            def handle_endtag(self, tag: str):
+                if self._in_h and tag == f"h{self._in_h}":
+                    text = "".join(self._buf).strip()
+                    if text:
+                        self.outer.headings.append((self._in_h, re.sub(r"\s+", " ", text)))
+                    self._in_h = None
+                    self._buf.clear()
 
-) -> Outline:
+        # feed the HTML into the inner parser
+        hp = HP(self)
+        hp.feed(html)
+
+    def to_outline(self) -> Outline:
         root = Outline("Document")
         stack: list[tuple[int, Outline]] = [(0, root)]
         for lvl, text in self.headings:
@@ -203,46 +214,47 @@ class _MiniHTMLHeadingParser:
         return root
 
 
-def html_to_outline(html: str) -> Outline:
-    if _HAVE_BS4:
-        soup = BeautifulSoup(html, "html.parser")
-        title = (soup.title.string or "").strip() if soup.title and soup.title.string else None
-        root = Outline(title or "Document")
-        stack: list[tuple[int, Outline]] = [(0, root)]
-        body = soup.body or soup
-        for el in body.descendants:
-            if getattr(el, "name", None) and re.fullmatch(r"h[1-6]", el.name or "", re.I):
-                lvl = int(el.name[1])
-                text = el.get_text(" ", strip=True)
-                node = Outline(text)
-                while stack and lvl <= stack[-1][0]:
-                    stack.pop()
-                stack[-1][1].add(node)
-                stack.append((lvl, node))
-            elif getattr(el, "name", None) in {"ul", "ol"}:
-                # attach list to the most recent heading
-                if stack:
-                    parent = stack[-1][1]
-                    lst = Outline("List")
-                    for li in el.find_all("li", recursive=False):
-                        txt = li.get_text(" ", strip=True)
-                        if txt:
-                            lst.add(Outline(txt))
-                    if lst.children:
-                        parent.add(lst)
-            # paragraphs not under any heading become Unsorted
-        # Capture stray paragraphs at top level
-        unsorted = Outline("Unsorted")
-        for p in body.find_all("p", recursive=True):
-            txt = p.get_text(" ", strip=True)
-            if txt:
-                unsorted.add(Outline(txt))
-        if unsorted.children:
-            root.add(unsorted)
-        return root
-    else:
-        logger.debug("bs4 not available; using minimal parser")
-        return _MiniHTMLHeadingParser(html).to_outline()
+
+    def html_to_outline(html: str) -> Outline:
+        if _HAVE_BS4:
+            soup = BeautifulSoup(html, "html.parser")
+            title = (soup.title.string or "").strip() if soup.title and soup.title.string else None
+            root = Outline(title or "Document")
+            stack: list[tuple[int, Outline]] = [(0, root)]
+            body = soup.body or soup
+            for el in body.descendants:
+                if getattr(el, "name", None) and re.fullmatch(r"h[1-6]", el.name or "", re.I):
+                    lvl = int(el.name[1])
+                    text = el.get_text(" ", strip=True)
+                    node = Outline(text)
+                    while stack and lvl <= stack[-1][0]:
+                        stack.pop()
+                    stack[-1][1].add(node)
+                    stack.append((lvl, node))
+                elif getattr(el, "name", None) in {"ul", "ol"}:
+                    # attach list to the most recent heading
+                    if stack:
+                        parent = stack[-1][1]
+                        lst = Outline("List")
+                        for li in el.find_all("li", recursive=False):
+                            txt = li.get_text(" ", strip=True)
+                            if txt:
+                                lst.add(Outline(txt))
+                        if lst.children:
+                            parent.add(lst)
+                # paragraphs not under any heading become Unsorted
+            # Capture stray paragraphs at top level
+            unsorted = Outline("Unsorted")
+            for p in body.find_all("p", recursive=True):
+                txt = p.get_text(" ", strip=True)
+                if txt:
+                    unsorted.add(Outline(txt))
+            if unsorted.children:
+                root.add(unsorted)
+            return root
+        else:
+            logger.debug("bs4 not available; using minimal parser")
+            return _MiniHTMLHeadingParser(html).to_outline()
 
 # --- Plain text parsing ----------------------------------------------------
 
