@@ -1,10 +1,5 @@
 __pycache__/
 # Add rules (idempotent)
-grep -qxF 'storage/*.db*' .gitignore || echo 'storage/*.db*' >> .gitignore
-grep -qxF '*.db'          .gitignore || echo '*.db'          >> .gitignore
-grep -qxF '*.db-*'        .gitignore || echo '*.db-*'        >> .gitignore
-grep -qxF '*.sqlite*'     .gitignore || echo '*.sqlite*'     >> .gitignore
-
 *.pyc
 *.pyo
 *.pyd
@@ -24,3 +19,4 @@ FunKit-WORKDIR-backup.tgz
 *.db
 *.sqlite*
 storage/*.db*
+openai.OpenAI.key
