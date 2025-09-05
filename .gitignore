@@ -23,3 +23,6 @@ openai.OpenAI.key
 
 # secrets
 openai.OpenAI.key
+
+# generated exports
+exported_docs/
