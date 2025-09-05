@@ -1,3 +1,5 @@
+from modules import inline_webview as _inlineweb
+from modules import opml_nav_helpers as _opmlnav
 from modules.provider_registry import registry
 import mimetypes
 from modules.provider_dropdown import ProviderDropdown
@@ -15,6 +17,7 @@ import xml.etree.ElementTree as ET
 
 # FunKit modules (all live under ./modules)
 from modules import hypertext_parser, image_generator, document_store
+from modules import aopml_engine
 from modules import image_render
 from modules.renderer import render_binary_as_text
 from modules.logger import Logger
@@ -304,6 +307,23 @@ class MarqueeStatusBar(ttk.Frame):
 
 
 class DemoKitGUI(tk.Tk):
+    def _hide_webpane(self):
+        """Hide inline web view (if present) and restore the Text widget."""
+        wp = getattr(self, "_webpane", None)
+        if wp and callable(getattr(wp, "winfo_exists", None)) and wp.winfo_exists():
+            try:
+                if hasattr(wp, "grid_remove"):
+                    wp.grid_remove()
+                elif hasattr(wp, "pack_forget"):
+                    wp.pack_forget()
+            except Exception:
+                pass
+        try:
+            if hasattr(self, "text") and not self.text.winfo_manager():
+                self.text.grid(row=0, column=0, sticky="nswe")
+        except Exception:
+            pass
+
     """FunKit / DemoKit GUI with OPML auto-rendering, provider switcher, URL bar, banner, and utilities."""
 
     SIDEBAR_WIDTH = 320
@@ -577,7 +597,22 @@ class DemoKitGUI(tk.Tk):
             import re
             EC, BOH, BOT = _resolve_engine()
             if EC is None:
-                self.after(0, lambda: messagebox.showerror("URL → OPML", "Aopmlengine.py not found."))
+                import logging, webbrowser
+                logging.warning("AOPML engine not found; falling back to web view")
+                try:
+                    self.marquee_show("AOPML engine not found -> rendering web view")
+                except Exception:
+                    pass
+                try:
+                    self._render_url_in_pane(url)
+                except Exception:
+                    try:
+                        self._render_url_in_pane(url)
+                    except Exception:
+                        (
+                            (self._show_url_in_pane(url) or self._render_with_qt6(url))
+                            if hasattr(self, '_render_with_qt6') else webbrowser.open(url)
+                        )
                 return
 
             # 1) fetch in background
@@ -1812,4 +1847,168 @@ def _sniff_image_bytes(self, b: bytes) -> str | None:
 
 
         return None
+
+
+# --- FunKit: inline webpane (tkinterweb) ---
+def _ensure_webpane(self):
+    """
+    Create/reuse an inline HTML viewer backed by tkinterweb.HtmlFrame
+    inside the document/content area. Returns the HtmlFrame or None.
+    """
+    try:
+        if getattr(self, "_webpane", None):
+            return self._webpane
+
+        # Try a few likely container attributes used in FunKit/DemoKit
+        container = None
+        for name in (
+            "document_pane", "doc_container", "document_frame",
+            "right_pane", "content_frame", "main_right", "body"
+        ):
+            container = getattr(self, name, None)
+            if container is not None:
+                break
+
+        # Fall back to 'self' if no specific pane is exposed
+        if container is None:
+            container = self
+
+        from tkinterweb import HtmlFrame  # pip install tkinterweb
+        frame = HtmlFrame(container, messages_enabled=False)
+        # Try to replace/overlay in the pane; pack is used in most builds
+        try:
+            frame.pack(fill="both", expand=True)
+        except Exception:
+            pass
+
+        self._webpane = frame
+        return frame
+    except Exception as _e:
+        import logging; logging.warning("Inline webpane unavailable: %s", _e)
+        return None
+
+def _render_url_in_pane(self, url: str):
+    """
+    Try to display a URL inside the app's document pane.
+    Raises RuntimeError if we can't render inline.
+    """
+    import logging
+    frame = _ensure_webpane(self)
+    if frame is None:
+        raise RuntimeError("inline webpane not available")
+    try:
+        # HtmlFrame API supports .load_website for remote URLs
+        frame.load_website(url)
+        logging.info("Inline webpane: loaded %s", url)
+        return True
+    except Exception as e:
+        logging.exception("Inline webpane failed for %s: %s", url, e)
+        raise
+# ------------------------------------------------------------------
+
+
+# --- FunKit: strong inline webpane ---
+def _get_doc_container(self):
+    """
+    Prefer the parent of the main document Text widget so the web view
+    appears exactly where the document content normally lives.
+    """
+    cand = getattr(self, "document_text", None)
+    if cand is not None and hasattr(cand, "master"):
+        return cand.master
+    for name in ("document_pane","doc_container","document_frame","right_pane","content_frame","main_right","body"):
+        obj = getattr(self, name, None)
+        if obj is not None:
+            return obj
+    return self  # last resort
+
+def _ensure_webpane(self):
+    """
+    Create (or reuse) a tkinterweb.HtmlFrame inside the document container.
+    If a text-based doc widget exists, hide it while the webpane is visible.
+    """
+    import logging
+    try:
+        # Reuse if already present
+        pane = getattr(self, "_webpane", None)
+        if pane: 
+            try:
+                # make sure it's mapped
+                if hasattr(pane, "pack"):
+                    pane.pack(fill="both", expand=True)
+            except Exception:
+                pass
+            # hide text view if present
+            txt = getattr(self, "document_text", None)
+            if txt and hasattr(txt, "pack_forget"):
+                try: txt.pack_forget()
+                except Exception: pass
+            return pane
+
+        container = _get_doc_container(self)
+        # Hide the text document widget if present
+        txt = getattr(self, "document_text", None)
+        if txt and hasattr(txt, "pack_forget"):
+            try: txt.pack_forget()
+            except Exception: pass
+
+        from tkinterweb import HtmlFrame  # pip install tkinterweb
+        pane = HtmlFrame(container, messages_enabled=False)
+        try:
+            pane.pack(fill="both", expand=True)
+        except Exception:
+            pass
+        self._webpane = pane
+        logging.info("Inline webpane created in %r", container)
+        return pane
+    except Exception as e:
+        import logging
+        logging.warning("Inline webpane unavailable: %s", e)
+        return None
+
+def _show_url_in_pane(self, url: str) -> bool:
+    """
+    Try to display URL inline. Returns True if shown inline, False otherwise.
+    """
+    import logging
+    pane = _ensure_webpane(self)
+    if pane is None:
+        logging.info("Inline webpane not available; cannot show %s inline", url)
+        return False
+    try:
+        # HtmlFrame API
+        pane.load_website(url)
+        logging.info("Inline webpane loaded %s", url)
+        return True
+    except Exception as e:
+        logging.exception("Inline webpane failed for %s: %s", url, e)
+        return False
+# ------------------------------------------------------------------
+
+
+# --- FunKit: Qt6 web renderer fallback ---
+def _render_with_qt6(self, url: str):
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        import multiprocessing as _mp
+        def _qt_proc(u: str):
+            app = QApplication([])
+            v = QWebEngineView()
+            v.setUrl(QUrl(u))
+            v.resize(1024, 768)
+            v.setWindowTitle("FunKit Web View")
+            v.show()
+            app.exec()
+        p = _mp.Process(target=_qt_proc, args=(url,), daemon=False)
+        p.start()
+    except Exception as e:
+        import webbrowser, logging
+        logging.warning("QT6 unavailable or failed (%s); opening system browser.", e)
+        (
+            self._show_url_in_pane(url)
+            or (hasattr(self, "_render_with_qt6") and (self._render_with_qt6(url) or True))
+            or webbrowser.open(url)
+        )
 
