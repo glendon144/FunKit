@@ -20,3 +20,6 @@ FunKit-WORKDIR-backup.tgz
 *.sqlite*
 storage/*.db*
 openai.OpenAI.key
+
+# secrets
+openai.OpenAI.key
