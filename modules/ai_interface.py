@@ -1,464 +1,431 @@
-# ai_interface.py
-# Providers: Local Mistral (llama.cpp), OpenAI, Baseten
-# Defaults to local Mistral on http://127.0.0.1:8080/v1
-# Streaming with optional live display:
-#   - Console: export AI_STREAM_STDOUT=1
-#   - Callback: ai.query(..., on_token=callable)
-# Always returns the full final string (even when streaming).
-
+# modules/ai_interface.py
 from __future__ import annotations
 
+# ---- optional local provider ----
+try:
+    from modules.local_ai_interface import Local_AI_Interface as _Local
+    _local_available = True
+except Exception:
+    try:
+        from modules.local_ai_interface import LocalAIInterface as _Local  # type: ignore
+        _local_available = True
+    except Exception:
+        _local_available = False
+        _Local = None  # type: ignore
+# ---------------------------------
+
 import os
-import re
 import json
-from typing import Dict, List, Optional, Any, Tuple, Union, Callable
+import time
+import logging
+import random
+import configparser
+from pathlib import Path
+from typing import Generator, Iterable
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
+# ---- optional OpenAI SDK ----
+try:
+    import openai  # type: ignore
+    _openai_available = True
+except Exception:
+    _openai_available = False
 
-# ----------------------- helpers -----------------------
+# ---- provider-level logger ----
+_prov_logger = logging.getLogger("funkit.ai.providers")
+if not _prov_logger.handlers:
+    _prov_logger.setLevel(logging.INFO)
+    try:
+        _pfh = logging.FileHandler("ai_query.log", encoding="utf-8")
+        _pfh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        _prov_logger.addHandler(_pfh)
+    except Exception:
+        _psh = logging.StreamHandler()
+        _psh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        _prov_logger.addHandler(_psh)
 
-def _env(name: str, default: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(name)
-    return v if v is not None and str(v).strip() != "" else default
+# ---- helpers ----
+def _read_settings() -> dict:
+    try:
+        p = Path("funkit_settings.json")
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
 
-
-def _ensure_v1(base: str) -> str:
-    base = (base or "").rstrip("/")
-    if not base:
-        return ""
-    return base if base.endswith("/v1") else base + "/v1"
-
-
-def _new_session(total_retries: int = 3, backoff: float = 0.25) -> requests.Session:
-    retry = Retry(
-        total=total_retries,
-        connect=total_retries,
-        read=total_retries,
-        backoff_factor=backoff,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=frozenset(["GET", "POST", "HEAD"]),
-        raise_on_status=False,
-    )
-    s = requests.Session()
-    adapter = HTTPAdapter(max_retries=retry)
-    s.mount("http://", adapter)
-    s.mount("https://", adapter)
-    s.trust_env = False  # avoid surprise proxies
-    s.proxies = {}
-    return s
-
-
-def _resolve_provider_name(name: Optional[str]) -> str:
-    """Map common labels/typos to canonical provider ids."""
-    if not name:
-        return "mistral"  # default to local llama.cpp
-    n = name.strip().lower()
-    n_compact = re.sub(r"[^a-z0-9]+", "", n)
-
-    # mistral / local llama.cpp
-    if any(k in n for k in ("mistral", "llama", "local")) or n_compact in {
-        "mistral", "llamacpp", "localllm", "mistralloca", "mistrallocal"
-    }:
-        return "mistral"
-
-    # baseten (incl. "base10" typo)
-    if "baseten" in n or "base10" in n or n_compact in {"baseten", "base10", "basetn"}:
-        return "baseten"
-
-    # openai
-    if "openai" in n or "gpt" in n or n_compact in {"openai", "oai", "chatgpt"}:
-        return "openai"
-
-    if n in {"mistral", "baseten", "openai"}:
-        return n
-    return "mistral"
-
-
-def _normalize_messages(
-    messages: Union[str, Dict[str, Any], Tuple[str, str], List[Any]]
-) -> List[Dict[str, str]]:
-    """
-    Accept flexible inputs and return a proper OpenAI-style messages array.
-    """
-    if isinstance(messages, dict) and "messages" in messages:
-        messages = messages["messages"]
-
-    if isinstance(messages, str):
-        return [{"role": "user", "content": messages}]
-
-    if isinstance(messages, dict):
-        role = str(messages.get("role", "user"))
-        content = messages.get("content", "")
-        return [{"role": role, "content": str(content)}]
-
-    if isinstance(messages, tuple) and len(messages) == 2:
-        role, content = messages
-        return [{"role": str(role), "content": str(content)}]
-
-    if isinstance(messages, list):
-        out: List[Dict[str, str]] = []
-        for item in messages:
-            if isinstance(item, str):
-                out.append({"role": "user", "content": item})
-            elif isinstance(item, tuple) and len(item) == 2:
-                r, c = item
-                out.append({"role": str(r), "content": str(c)})
-            elif isinstance(item, dict):
-                r = str(item.get("role", "user"))
-                c = item.get("content", "")
-                out.append({"role": r, "content": str(c)})
-            else:
-                out.append({"role": "user", "content": str(item)})
-        if not out:
-            raise ValueError("Empty messages list after normalization.")
-        return out
-
-    return [{"role": "user", "content": str(messages)}]
-
-
-def _parse_timeout_env(prefix: str, default: Union[int, float, Tuple[float, float]]) -> Union[float, Tuple[float, float]]:
-    """
-    Support:
-      PREFIX_TIMEOUT="60"          -> 60.0 (single)
-      PREFIX_TIMEOUT="5,300"       -> (5.0, 300.0) (connect, read)
-      PREFIX_CONNECT_TIMEOUT=5 and PREFIX_READ_TIMEOUT=300 -> (5.0, 300.0)
-    """
-    conn = _env(f"{prefix}_CONNECT_TIMEOUT", None)
-    read = _env(f"{prefix}_READ_TIMEOUT", None)
-    if conn and read:
-        return (float(conn), float(read))
-
-    raw = _env(f"{prefix}_TIMEOUT", None)
-    if raw and "," in raw:
-        a, b = raw.split(",", 1)
-        return (float(a.strip()), float(b.strip()))
-    if raw:
-        return float(raw)
-
-    # default fallback
-    if isinstance(default, tuple):
-        return (float(default[0]), float(default[1]))
-    return float(default)
-
-
-# ----------------------- provider config -----------------------
-
-class _ProviderConfig:
-    def __init__(
-        self,
-        name: str,
-        base_url: str,
-        model: str,
-        api_key_env: Optional[str] = None,
-        auth_scheme: str = "Bearer",
-        timeout: Union[int, float, Tuple[float, float]] = 60,
-        extra_headers: Optional[Dict[str, str]] = None,
-    ):
-        self.name = name
-        self.base_url = _ensure_v1(base_url)
-        self.model = model
-        self.api_key_env = api_key_env
-        self.auth_scheme = auth_scheme
-        self.timeout = timeout
-        self.extra_headers = extra_headers or {}
-
-    def headers(self) -> Dict[str, str]:
-        h = {"Content-Type": "application/json"}
-        if self.api_key_env:
-            key = _env(self.api_key_env, None)
-            if key:
-                if self.auth_scheme.lower() == "api-key":
-                    h["Authorization"] = f"Api-Key {key}"
-                else:
-                    h["Authorization"] = f"Bearer {key}"
-        h.update(self.extra_headers)
-        return h
-
-    def chat_url(self) -> str:
-        return self.base_url.rstrip("/") + "/chat/completions"
-
-    def models_url(self) -> str:
-        return self.base_url.rstrip("/") + "/models"
-
-
-# ----------------------- main class -----------------------
+def _load_user_config() -> tuple[configparser.ConfigParser, Path]:
+    """Load ~/.funkit/funkit.conf (create with defaults if missing)."""
+    home_cfg_dir = Path.home() / ".funkit"
+    cfg_path = home_cfg_dir / "funkit.conf"
+    cp = configparser.ConfigParser()
+    if not cfg_path.exists():
+        home_cfg_dir.mkdir(parents=True, exist_ok=True)
+        template = "; FunKit configuration (INI)\n" \
+                   "; Location: ~/.funkit/funkit.conf\n" \
+                   "; Lines starting with ';' or '#' are comments.\n\n" \
+                   "[core]\n" \
+                   "; Default provider on startup: openai | baseten | local\n" \
+                   "provider = openai\n\n" \
+                   "[openai]\n" \
+                   "api_key = \n\n" \
+                   "[baseten]\n" \
+                   "; Baseten OpenAI-compatible inference base URL (recommended)\n" \
+                   "url = https://inference.baseten.co/v1\n" \
+                   "; Human-readable model NAME for inference gateway (e.g., openai/gpt-oss-120b)\n" \
+                   "model = openai/gpt-oss-120b\n" \
+                   "; API key for Baseten\n" \
+                   "api_key = \n" \
+                   "; Transport selection: auto | sdk | http\n" \
+                   "transport = auto\n" \
+                   "; Endpoint mode for HTTP: base | chat | responses | auto\n" \
+                   "endpoint_mode = base\n\n" \
+                   "[local]\n" \
+                   "; Reserved for local settings (if needed)\n" \
+                   "; endpoint = http://localhost:11434/v1\n"
+        cfg_path.write_text(template, encoding="utf-8")
+    cp.read(cfg_path)
+    return cp, cfg_path
 
 class AIInterface:
-    """
-    Example:
-        ai = AIInterface()  # defaults to local mistral (llama.cpp)
-        out = ai.query("Say hi in one short sentence.")   # string OK
+    def __init__(self, provider: str | None = None):
+        cp, _ = _load_user_config()
 
-    Switch at runtime:
-        ai.set_provider("mistral" | "baseten" | "openai")
-
-    Env knobs:
-        # Local mistral (llama.cpp)
-        MISTRAL_BASE=http://127.0.0.1:8080/v1
-        MISTRAL_MODEL=local-mistral
-        # Timeouts (any of these):
-        MISTRAL_TIMEOUT=60
-        MISTRAL_TIMEOUT="5,300"              # connect=5s, read=300s
-        MISTRAL_CONNECT_TIMEOUT=5
-        MISTRAL_READ_TIMEOUT=300
+        # Provider: config -> env -> arg -> default
+        prov_cfg = cp.get("core", "provider", fallback="").strip().lower()
+        prov_env = os.environ.get("AI_PROVIDER", "").strip().lower()
+        self.provider = (prov_cfg or prov_env or (provider or "openai")).lower()
 
         # OpenAI
-        OPENAI_API_KEY=sk-...
-        OPENAI_BASE=https://api.openai.com/v1
-        OPENAI_MODEL=gpt-4o-mini
-        OPENAI_TIMEOUT=60
+        self.openai_key = cp.get("openai", "api_key", fallback="") or os.environ.get("OPENAI_API_KEY", "")
 
         # Baseten
-        BASETEN_API_KEY=bt-...
-        BASETEN_URL=https://YOUR-MODEL.basen.run/v1
-        BASETEN_MODEL=baseten
-        BASETEN_AUTH_SCHEME=Api-Key   # or Bearer
-        BASETEN_TIMEOUT=60
+        self.baseten_key = cp.get("baseten", "api_key", fallback="") or os.environ.get("BASETEN_API_KEY", "")
+        self.baseten_url = (
+            cp.get("baseten", "url", fallback="").strip()
+            or os.environ.get("BASETEN_URL", "").strip()
+            or "https://inference.baseten.co/v1"
+        )
+        self.baseten_transport = (cp.get("baseten", "transport", fallback="auto").strip().lower()
+                                  or os.environ.get("BASETEN_TRANSPORT", "auto").strip().lower())
+        self.baseten_endpoint_mode = (cp.get("baseten", "endpoint_mode", fallback="base").strip().lower()
+                                      or os.environ.get("BASETEN_ENDPOINT_MODE", "base").strip().lower())
+        self._baseten_model_cfg = cp.get("baseten", "model", fallback="").strip()
 
-        # Desired default provider
-        AI_PROVIDER=mistral|baseten|openai|base10|local|llama...
+        # Local provider instance holder
+        self._local = None
 
-        # Console streaming
-        AI_STREAM_STDOUT=1
-    """
-
-    def __init__(self, provider: Optional[str] = None):
-        self.session = _new_session()
-        self.cfgs: Dict[str, _ProviderConfig] = {
-            "mistral": _ProviderConfig(
-                name="mistral",
-                base_url=_env("MISTRAL_BASE", "http://127.0.0.1:8080/v1"),
-                model=_env("MISTRAL_MODEL", "local-mistral"),
-                api_key_env=None,  # llama.cpp typically needs no key
-                auth_scheme="none",
-                timeout=_parse_timeout_env("MISTRAL", (5.0, 300.0)),  # sensible default tuple
-            ),
-            "openai": _ProviderConfig(
-                name="openai",
-                base_url=_env("OPENAI_BASE", "https://api.openai.com/v1"),
-                model=_env("OPENAI_MODEL", "gpt-4o-mini"),
-                api_key_env="OPENAI_API_KEY",
-                auth_scheme="Bearer",
-                timeout=float(_env("OPENAI_TIMEOUT", "60")),
-            ),
-            "baseten": _ProviderConfig(
-                name="baseten",
-                base_url=_env("BASETEN_URL", ""),
-                model=_env("BASETEN_MODEL", "baseten"),
-                api_key_env="BASETEN_API_KEY",
-                auth_scheme=_env("BASETEN_AUTH_SCHEME", "Api-Key"),
-                timeout=float(_env("BASETEN_TIMEOUT", "60")),
-            ),
-        }
-
-        requested = provider or _env("AI_PROVIDER", None)
-        self.provider = _resolve_provider_name(requested)
-
-        cfg = self.cfgs[self.provider]
-        print(f"[ai_interface] Provider='{self.provider}' → base='{cfg.base_url}' model='{cfg.model}'")
-
-        if self.provider == "baseten" and not cfg.base_url:
-            print("[ai_interface] WARNING: BASETEN_URL is not set. Set it or switch provider to 'mistral'/'openai'.")
-
-        self._stream_stdout = _env("AI_STREAM_STDOUT", "0") in {"1", "true", "yes", "on"}
-
-    # -------- API --------
-
+    # -------- Public API --------
     def set_provider(self, provider: str) -> None:
-        prov = _resolve_provider_name(provider)
-        if prov not in self.cfgs:
-            raise ValueError(f"Unknown provider '{provider}' (canonical='{prov}'). Options: {list(self.cfgs.keys())}")
-        self.provider = prov
-        cfg = self.cfgs[self.provider]
-        print(f"[ai_interface] Switched to '{self.provider}' (base={cfg.base_url}, model={cfg.model})")
+        self.provider = (provider or "openai").lower()
+        if self.provider == "baseten" and not (self.baseten_url or "").strip():
+            self.baseten_url = "https://inference.baseten.co/v1"
 
-    def _post(self, url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: Union[float, Tuple[float, float]], stream: bool):
-        return self.session.post(url, headers=headers, data=json.dumps(payload), timeout=timeout, stream=stream)
+    def get_provider(self) -> str:
+        return self.provider
 
-    def _consume_stream(self, resp: requests.Response, on_token: Optional[Callable[[str], None]]) -> str:
-        """
-        Parse OpenAI-style SSE: lines like 'data: {...}' ending with 'data: [DONE]'.
-        Accumulate delta.content pieces. If AI_STREAM_STDOUT=1 or on_token is provided,
-        emit tokens live.
-        """
-        out_parts: List[str] = []
-        for raw in resp.iter_lines(decode_unicode=True, chunk_size=8192):
-            if not raw:
-                continue
-            line = raw.strip()
-            if not line.startswith("data:"):
-                continue
-            data_str = line[5:].strip()
-            if data_str == "[DONE]":
-                break
+    def query(self, prompt: str, stream: bool = False, **kwargs):
+        pid = random.getrandbits(32)
+        _prov_logger.info("DISPATCH provider=%s id=%s", self.provider, pid)
+
+        prov = self.provider
+        if prov == "openai":
+            return self._query_openai(prompt, stream=stream, **kwargs)
+        elif prov == "baseten":
+            return self._query_baseten(prompt, stream=stream, **kwargs)
+        elif prov == "local":
+            return self._query_local(prompt, stream=stream, **kwargs)
+        else:
+            raise ValueError(f"Unknown provider: {prov}")
+
+    # -------- Provider: OpenAI --------
+    def _query_openai(self, prompt: str, stream: bool = False, **kwargs):
+        _provider = "openai"
+        _model = str(kwargs.get("model", "gpt-4o"))
+        _endpoint = "https://api.openai.com/v1/chat/completions"
+        _t0 = time.perf_counter()
+        _prov_logger.info("START provider=%s model=%s endpoint=%s", _provider, _model, _endpoint)
+
+        temperature = kwargs.get("temperature", 0.3)
+        system_prompt = kwargs.get("system_prompt", "You are a helpful assistant.")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        if _openai_available:
             try:
-                jd = json.loads(data_str)
-                delta = jd["choices"][0].get("delta", {})
-                piece = delta.get("content")
-                if piece:
-                    out_parts.append(piece)
-                    if on_token:
+                openai.api_key = self.openai_key  # type: ignore[attr-defined]
+
+                if stream:
+                    response = openai.ChatCompletion.create(  # type: ignore[attr-defined]
+                        model=_model,
+                        messages=messages,
+                        temperature=temperature,
+                        stream=True,
+                    )
+
+                    def _gen() -> Generator[str, None, None]:
+                        total_len = 0
                         try:
-                            on_token(piece)
-                        except Exception:
-                            pass
-                    if self._stream_stdout:
-                        print(piece, end="", flush=True)
-            except Exception:
-                # Be forgiving of non-standard chunks
-                try:
-                    jd = json.loads(data_str)
-                    msg = jd["choices"][0]["message"]["content"]
-                    if isinstance(msg, str):
-                        out_parts.append(msg)
-                        if on_token:
-                            try:
-                                on_token(msg)
-                            except Exception:
-                                pass
-                        if self._stream_stdout:
-                            print(msg, end="", flush=True)
-                except Exception:
-                    pass
-        if self._stream_stdout:
-            print("")  # newline after stream
-        return "".join(out_parts).strip()
+                            for chunk in response:
+                                content = chunk["choices"][0].get("delta", {}).get("content")
+                                if content:
+                                    total_len += len(content)
+                                    yield content
+                        finally:
+                            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                            _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                              _provider, _model, _endpoint, elapsed_ms, total_len)
+                    return _gen()
 
-    def query(
-        self,
-        messages: Union[str, Dict[str, Any], Tuple[str, str], List[Any]],
-        provider: Optional[str] = None,
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        stream: Optional[bool] = None,
-        extra_payload: Optional[Dict[str, Any]] = None,
-        timeout: Optional[Union[float, Tuple[float, float]]] = None,
-        on_token: Optional[Callable[[str], None]] = None,
-    ) -> str:
-        prov = _resolve_provider_name(provider) if provider else self.provider
-        if prov not in self.cfgs:
-            raise ValueError(f"Unknown provider '{prov}'. Options: {list(self.cfgs.keys())}")
-
-        cfg = self.cfgs[prov]
-        if prov == "baseten" and not cfg.base_url:
-            raise RuntimeError(
-                "[baseten] BASETEN_URL not set. Export BASETEN_URL=https://YOUR-MODEL.basen.run/v1 "
-                "or switch provider to 'mistral' or 'openai'."
-            )
-
-        url = cfg.chat_url()
-        headers = cfg.headers()
-
-        # Default to streaming for mistral (llama.cpp) to avoid read timeouts
-        use_stream = bool(stream) if stream is not None else (prov == "mistral")
-
-        # Normalize any input into a valid messages array
-        norm_messages = _normalize_messages(messages)
-
-        payload: Dict[str, Any] = {
-            "model": cfg.model,
-            "messages": norm_messages,
-            "temperature": float(temperature),
-            "stream": use_stream,
-        }
-        if max_tokens is not None:
-            payload["max_tokens"] = int(max_tokens)
-        if extra_payload:
-            payload.update(extra_payload)
-
-        tmo = timeout if timeout is not None else cfg.timeout
-
-        try:
-            r = self._post(url, headers, payload, tmo, stream=use_stream)
-        except requests.RequestException as e:
-            raise RuntimeError(f"[{prov}] Request error: {e}") from e
-
-        if not (200 <= r.status_code < 300):
-            body = r.text or ""
-            snippet = (body[:500] + "…") if len(body) > 500 else body
-            raise RuntimeError(f"[{prov}] HTTP {r.status_code} at {url} — {snippet}")
-
-        if use_stream:
-            return self._consume_stream(r, on_token=on_token)
-
-        # Non-stream parse
-        try:
-            data = r.json()
-        except ValueError as e:
-            raise RuntimeError(f"[{prov}] Invalid JSON: {(r.text or '')[:300]}") from e
-
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as e:
-            raise RuntimeError(f"[{prov}] Missing choices/message.content in response: {json.dumps(data)[:400]}") from e
-
-        # If non-stream and user provided on_token, emit once at end (optional)
-        if on_token and isinstance(content, str) and content:
-            try:
-                on_token(content)
+                response = openai.ChatCompletion.create(  # type: ignore[attr-defined]
+                    model=_model,
+                    messages=messages,
+                    temperature=temperature,
+                    stream=False,
+                )
+                text = response["choices"][0]["message"]["content"]
+                elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                  _provider, _model, _endpoint, elapsed_ms, len(text or ""))
+                return text
             except Exception:
                 pass
 
-        return content.strip() if isinstance(content, str) else str(content).strip()
-
-    def health(self, provider: Optional[str] = None) -> Dict[str, Any]:
-        """Try GET /v1/models (works on OpenAI-compatible servers like llama.cpp)."""
-        prov = _resolve_provider_name(provider) if provider else self.provider
-        cfg = self.cfgs[prov]
-        url = cfg.models_url()
+        headers = {"Authorization": f"Bearer {self.openai_key}", "Content-Type": "application/json"}
+        data = {"model": _model, "messages": messages, "temperature": temperature, "stream": bool(stream)}
         try:
-            r = self.session.get(url, headers=cfg.headers(), timeout=cfg.timeout if isinstance(cfg.timeout, (int, float)) else 15.0)
-            ok = 200 <= r.status_code < 300
-            return {"ok": ok, "status": r.status_code, "url": url, "body": (r.text[:200] if not ok else "")}
-        except requests.RequestException as e:
-            return {"ok": False, "error": str(e), "url": url}
+            if stream:
+                with requests.post(_endpoint, headers=headers, json=data, stream=True, timeout=300) as resp:
+                    resp.raise_for_status()
 
+                    def _gen_lines(it: Iterable[bytes]) -> Generator[str, None, None]:
+                        total_len = 0
+                        try:
+                            for raw in it:
+                                if not raw:
+                                    continue
+                                line = raw.lstrip(b"data: ").decode("utf-8", "ignore")
+                                if not line or line.strip() == "[DONE]":
+                                    continue
+                                try:
+                                    obj = json.loads(line)
+                                    delta = (obj.get("choices") and obj["choices"][0]["delta"].get("content")) or None
+                                    if delta:
+                                        total_len += len(delta)
+                                        yield delta
+                                except Exception:
+                                    continue
+                        finally:
+                            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                            _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                              _provider, _model, _endpoint, elapsed_ms, total_len)
+                    return _gen_lines(resp.iter_lines())
+            else:
+                resp = requests.post(_endpoint, headers=headers, json=data, timeout=300)
+                resp.raise_for_status()
+                obj = resp.json()
+                text = obj["choices"][0]["message"]["content"]
+                elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                  _provider, _model, _endpoint, elapsed_ms, len(text or ""))
+                return text
+        except Exception as e:
+            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+            _prov_logger.exception("ERROR provider=%s model=%s endpoint=%s elapsed_ms=%s",
+                                   _provider, _model, _endpoint, elapsed_ms)
+            raise RuntimeError(f"OpenAI HTTP error: {e}") from e
 
-# ----------------------- CLI smoke test -----------------------
+    # -------- Provider: Baseten --------
+    def _resolve_baseten_model(self, kwargs) -> str:
+        m = kwargs.get("model")
+        if not m:
+            m = self._baseten_model_cfg
+        if not m:
+            m = os.environ.get("BASETEN_MODEL") or os.environ.get("BASETEN_MODEL_NAME")
+        if not m:
+            cfg = _read_settings()
+            m = (cfg.get("baseten") or {}).get("model") or (cfg.get("baseten") or {}).get("name")
+        if not m:
+            m = kwargs.get("mistral_model")
+        if not m:
+            raise RuntimeError(
+                "Baseten model name is required. Set one of: "
+                "kwargs['model'], baseten.model in ~/.funkit/funkit.conf, "
+                "BASETEN_MODEL env var, or kwargs['mistral_model']."
+            )
+        return str(m)
 
-if __name__ == "__main__":
-    import argparse
-    p = argparse.ArgumentParser(description="ai_interface smoke test")
-    p.add_argument("--provider", default=_env("AI_PROVIDER", "mistral"))
-    p.add_argument("--prompt", default="Say hi in one short sentence.")
-    p.add_argument("--temperature", type=float, default=0.7)
-    p.add_argument("--max_tokens", type=int, default=None)
-    p.add_argument("--no-stream", action="store_true", help="Force non-streaming request")
-    p.add_argument("--timeout", default=None, help='Override timeout, e.g. "5,300" or "120"')
-    args = p.parse_args()
+    def _choose_baseten_endpoint(self, base_url: str, mode: str) -> tuple[str, str]:
+        base = (base_url or "").rstrip("/")
+        if mode == "base":
+            return base, "base"
+        if mode == "chat":
+            return f"{base}/chat/completions", "chat"
+        if mode == "responses":
+            return f"{base}/responses", "responses"
+        if "inference.baseten.co" in base:
+            return base, "base"
+        if "/model_versions/" in base:
+            return base, "legacy"
+        if base.endswith("/chat/completions") or base.endswith("/responses"):
+            return base, "explicit"
+        return f"{base}/chat/completions", "chat-fallback"
 
-    ai = AIInterface(provider=args.provider)
+    def _query_baseten(self, prompt: str, stream: bool = False, **kwargs):
+        _provider = "baseten"
+        _model = self._resolve_baseten_model(kwargs)
+        url = (self.baseten_url or "").strip()
+        transport = (self.baseten_transport or "auto").lower()
+        endpoint, endpoint_mode = self._choose_baseten_endpoint(url, (self.baseten_endpoint_mode or "base").lower())
+        _t0 = time.perf_counter()
+        _prov_logger.info("START provider=%s model=%s endpoint=%s transport=%s mode=%s",
+                          _provider, _model, endpoint, transport, endpoint_mode)
 
-    # Optional: simple console printer (demonstrates on_token)
-    def _printer(tok: str):
-        print(tok, end="", flush=True)
+        temperature = kwargs.get("temperature", 0.3)
+        system_prompt = kwargs.get("system_prompt", "You are a helpful assistant.")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
 
-    # Parse CLI timeout
-    tmo = None
-    if args.timeout:
-        if "," in args.timeout:
-            a, b = args.timeout.split(",", 1)
-            tmo = (float(a), float(b))
-        else:
-            tmo = float(args.timeout)
+        if ("inference.baseten.co" in url) and (transport in ("auto", "sdk")) and _openai_available:
+            try:
+                try:
+                    openai.api_key = self.baseten_key  # type: ignore[attr-defined]
+                    try:
+                        openai.api_base = url  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
-    try:
-        text = ai.query(
-            args.prompt,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            stream=False if args.no_stream else None,  # default streams on mistral
-            timeout=tmo,
-            on_token=_printer if _env("AI_STREAM_STDOUT", "0") in {"1", "true", "yes", "on"} else None,
-        )
-        # Ensure newline when not streaming or when callback wasn’t set
-        if _env("AI_STREAM_STDOUT", "0") not in {"1", "true", "yes", "on"}:
-            print(text)
-        else:
-            print()  # newline after streamed printing
-    except Exception as e:
-        print(f"ERROR: {e}")
+                if stream:
+                    response = openai.ChatCompletion.create(  # type: ignore[attr-defined]
+                        model=_model,
+                        messages=messages,
+                        temperature=temperature,
+                        stream=True,
+                    )
 
+                    def _gen() -> Generator[str, None, None]:
+                        total_len = 0
+                        try:
+                            for chunk in response:
+                                content = chunk["choices"][0].get("delta", {}).get("content")
+                                if content:
+                                    total_len += len(content)
+                                    yield content
+                        finally:
+                            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                            _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                              _provider, _model, url, elapsed_ms, total_len)
+                    return _gen()
+
+                response = openai.ChatCompletion.create(  # type: ignore[attr-defined]
+                    model=_model,
+                    messages=messages,
+                    temperature=temperature,
+                    stream=False,
+                )
+                text = response["choices"][0]["message"]["content"]
+                elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                  _provider, _model, url, elapsed_ms, len(text or ""))
+                return text
+            except Exception as e:
+                if transport == "sdk":
+                    elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                    _prov_logger.exception("ERROR provider=%s model=%s endpoint=%s elapsed_ms=%s",
+                                           _provider, _model, url, elapsed_ms)
+                    raise RuntimeError(f"Baseten(OpenAI SDK) error: {e}") from e
+
+        try:
+            if "inference.baseten.co" in url:
+                headers = {"Authorization": f"Bearer {self.baseten_key}", "Content-Type": "application/json"}
+                payload = {"model": _model, "messages": messages, "temperature": temperature, "stream": bool(stream)}
+            else:
+                headers = {"Authorization": f"Api-Key {self.baseten_key}", "Content-Type": "application/json"}
+                payload = {"prompt": prompt, "temperature": temperature, "stream": bool(stream)}
+
+            if stream:
+                with requests.post(endpoint, headers=headers, json=payload, stream=True, timeout=300) as resp:
+                    try:
+                        resp.raise_for_status()
+                    except Exception:
+                        raise RuntimeError(f"{resp.status_code} {resp.reason}: {endpoint} :: {resp.text[:200]}")
+
+                    if "inference.baseten.co" in url:
+                        def _gen_lines(it: Iterable[bytes]) -> Generator[str, None, None]:
+                            total_len = 0
+                            try:
+                                for raw in it:
+                                    if not raw:
+                                        continue
+                                    line = raw.lstrip(b"data: ").decode("utf-8", "ignore")
+                                    if not line or line.strip() == "[DONE]":
+                                        continue
+                                    try:
+                                        obj = json.loads(line)
+                                        delta = (obj.get("choices") and obj["choices"][0]["delta"].get("content")) or None
+                                        if delta:
+                                            total_len += len(delta)
+                                            yield delta
+                                    except Exception:
+                                        continue
+                            finally:
+                                elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                                _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                                  _provider, _model, endpoint, elapsed_ms, total_len)
+                        return _gen_lines(resp.iter_lines())
+                    else:
+                        def _gen_legacy(it: Iterable[bytes]) -> Generator[str, None, None]:
+                            total_len = 0
+                            try:
+                                for raw in it:
+                                    if not raw:
+                                        continue
+                                    s = raw.decode("utf-8", "ignore")
+                                    if not s.strip():
+                                        continue
+                                    total_len += len(s)
+                                    yield s
+                            finally:
+                                elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+                                _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                                                  _provider, _model, endpoint, elapsed_ms, total_len)
+                        return _gen_legacy(resp.iter_lines())
+
+            resp = requests.post(endpoint, headers=headers, json=payload, timeout=300)
+            try:
+                resp.raise_for_status()
+            except Exception:
+                raise RuntimeError(f"{resp.status_code} {resp.reason}: {endpoint} :: {resp.text[:200]}")
+
+            if "inference.baseten.co" in url:
+                obj = resp.json()
+                text = obj["choices"][0]["message"]["content"]
+            else:
+                obj = resp.json()
+                text = obj.get("text") or obj.get("output") or obj.get("response") or json.dumps(obj)[:2000]
+
+            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+            _prov_logger.info("END provider=%s model=%s endpoint=%s elapsed_ms=%s resp_len=%s",
+                              _provider, _model, endpoint, elapsed_ms, len(text or ""))
+            return text
+
+        except Exception as e:
+            elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+            _prov_logger.exception("ERROR provider=%s model=%s endpoint=%s elapsed_ms=%s",
+                                   _provider, _model, endpoint, elapsed_ms)
+            raise RuntimeError(f"Baseten error: {e}") from e
+
+    # -------- Provider: Local (bridged) --------
+    def _query_local(self, prompt: str, stream: bool = False, **kwargs):
+        if not _local_available:
+            raise RuntimeError("Local provider requested but Local_AI_Interface not available")
+        if getattr(self, "_local", None) is None:
+            self._local = _Local()
+        return self._local.query(prompt, stream=stream, **kwargs)

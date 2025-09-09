@@ -5,6 +5,7 @@ import mimetypes
 from modules.provider_dropdown import ProviderDropdown
 import os
 import threading
+import logging
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
@@ -14,6 +15,50 @@ import sys
 import json
 import re
 import xml.etree.ElementTree as ET
+from modules.ai_singleton import get_ai, set_provider_global
+# ---- structured logging for AI requests ----
+logger = logging.getLogger("funkit.ai")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    try:
+        _fh = logging.FileHandler("ai_query.log", encoding="utf-8")
+        _fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        logger.addHandler(_fh)
+    except Exception:
+        _sh = logging.StreamHandler()
+        _sh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        logger.addHandler(_sh)
+# -------------------------------------------
+
+def _bind_provider_hotkeys(self):
+    """Bind convenient shortcuts to switch providers.
+    Ctrl+Alt+L -> Local, Ctrl+Alt+B -> Baseten, Ctrl+Alt+O -> OpenAI
+    """
+    try:
+        self.bind_all('<Control-Alt-l>', lambda e: self._force_provider('local'))
+        self.bind_all('<Control-Alt-b>', lambda e: self._force_provider('baseten'))
+        self.bind_all('<Control-Alt-o>', lambda e: self._force_provider('openai'))
+    except Exception:
+        pass
+
+def _force_provider(self, prov: str):
+    try:
+        from modules.ai_singleton import set_provider_global
+        set_provider_global(prov)
+    except Exception:
+        pass
+    try:
+        if hasattr(self, 'ai') and hasattr(self.ai, 'set_provider'):
+            self.ai.set_provider(prov)
+    except Exception:
+        pass
+    try:
+        if hasattr(self, 'processor') and hasattr(self.processor, 'ai') and hasattr(self.processor.ai, 'set_provider'):
+            self.processor.ai.set_provider(prov)
+    except Exception:
+        pass
+
+
 
 # FunKit modules (all live under ./modules)
 from modules import hypertext_parser, image_generator, document_store
@@ -307,28 +352,55 @@ class MarqueeStatusBar(ttk.Frame):
 
 
 class DemoKitGUI(tk.Tk):
-    def _hide_webpane(self):
-        """Hide inline web view (if present) and restore the Text widget."""
-        wp = getattr(self, "_webpane", None)
-        if wp and callable(getattr(wp, "winfo_exists", None)) and wp.winfo_exists():
-            try:
-                if hasattr(wp, "grid_remove"):
-                    wp.grid_remove()
-                elif hasattr(wp, "pack_forget"):
-                    wp.pack_forget()
-            except Exception:
-                pass
+    def _provider_status_cb(self, lbl, mdl):
+        # Map UI label -> internal provider key
+        label = (str(lbl) or '').lower()
+        if 'openai' in label:
+            _prov = 'openai'
+        elif 'baseten' in label or 'mistral' in label:
+            _prov = 'baseten'
+        elif 'local' in label or 'llama' in label:
+            _prov = 'local'
+        else:
+            _prov = 'openai'
+
+        # Remember selection (for UI/logs)
+        self._last_provider_label = str(lbl)
+        self._last_provider_model = str(mdl)
+
+        # Update ticker
+        cb = getattr(self, 'set_ticker_text', None)
+        if callable(cb):
+            cb(f"{lbl} • {mdl}")
+        else:
+            self.status(f"{lbl} • {mdl}")
+
+        # Propagate to the *shared* AI instance and any attached processor
         try:
-            if hasattr(self, "text") and not self.text.winfo_manager():
-                self.text.grid(row=0, column=0, sticky="nswe")
+            set_provider_global(_prov)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'ai') and hasattr(self.ai, 'set_provider'):
+                self.ai.set_provider(_prov)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'processor') and hasattr(self.processor, 'ai') and hasattr(self.processor.ai, 'set_provider'):
+                self.processor.ai.set_provider(_prov)
         except Exception:
             pass
 
-    """FunKit / DemoKit GUI with OPML auto-rendering, provider switcher, URL bar, banner, and utilities."""
-
-    SIDEBAR_WIDTH = 320
-
     def __init__(self, doc_store, processor):
+        # --- Ensure GUI constants exist (auto-inserted) ---  ##__GUI_CONST_GUARD__
+        # Use __dict__ to avoid Tkinter __getattr__ recursion
+        if 'SIDEBAR_WIDTH' not in self.__dict__:
+            self.SIDEBAR_WIDTH = 260
+        if 'EDITOR_MINWIDTH' not in self.__dict__:
+            self.EDITOR_MINWIDTH = 480
+        if 'TOPBAR_HEIGHT' not in self.__dict__:
+            self.TOPBAR_HEIGHT = 36
+        # ---------------------------------------------------
         try: self.bind("<Control-Shift-I>", self._on_import_images_clicked)
         except Exception: pass
         try: self.bind("<Control-Shift-E>", self._export_current_images_aware)
@@ -365,7 +437,7 @@ class DemoKitGUI(tk.Tk):
         self.topbar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         # Provider switch (left)
-        self.provider_switch = ProviderDropdown(self.topbar, status_cb=lambda lbl, mdl: getattr(self, 'set_ticker_text', self.status)(f"{lbl} • {mdl}"))
+        self.provider_switch = ProviderDropdown(self.topbar, status_cb=self._provider_status_cb)
         self.provider_switch.grid(row=0, column=0, sticky="w")
 
         # URL/Search entry (right side)
@@ -658,6 +730,9 @@ class DemoKitGUI(tk.Tk):
     # ---------------- ASK / BACK ----------------
 
     def _handle_ask(self):
+        provider_label = getattr(self, '_last_provider_label', 'unknown')
+        provider_model = getattr(self, '_last_provider_model', '')
+        logger.info("ASK start | provider=%s | model=%s | prompt_len=%s", provider_label, provider_model, len(selected_text) if 'selected_text' in locals() else 'na')
         try:
             start = self.text.index(tk.SEL_FIRST)
             end = self.text.index(tk.SEL_LAST)
