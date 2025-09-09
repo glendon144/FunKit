@@ -27,7 +27,9 @@ def main():
     # Launch the GUI
     app = DemoKitGUI(doc_store, processor)
     attach_image_rendering(app)
-    open_memory_dialog(app)   # adds Tools → Memory… and Ctrl+M
+    # Lazy-load the Memory window: open only when user presses Ctrl+M
+    from modules.memory_dialog import open_memory_dialog
+    app.bind("<Control-m>", lambda e: open_memory_dialog(app))
 
     # Wire plugins
     install_opml_extras_into_app(app)      # URL→OPML, Convert→OPML, Batch Convert

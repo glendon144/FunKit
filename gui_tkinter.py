@@ -91,6 +91,29 @@ def fetch_html_with_fallback(url, max_bytes, connect_to, read_to, budget_s):
 # Grid-safe ProviderSwitcher (no pack; tolerant of return shapes)
 # ---------------------------------------------------------------------
 class ProviderSwitcher_DEPRECATED(ttk.Frame):
+    def _on_provider_changed(self, value):
+        """Callback when provider dropdown is changed."""
+        provider = self.provider_var.get()
+        self.ai.set_provider(provider)
+        self._log(f"Provider switched to: {provider}")
+        # Optionally update UI label or status
+        if hasattr(self, "provider_status_label"):
+            self.provider_status_label.config(text=f"Provider: {provider}")
+
+    # --- Logging as previously described ---
+    def _log(self, msg):
+        with open("ai_query.log", "a") as f:
+            f.write(f"{datetime.datetime.now()} | {msg}\n")
+
+    def _log_success(self, provider, prompt, reply):
+        with open("ai_query.log", "a") as f:
+            f.write(f"{datetime.datetime.now()} | PROVIDER: {provider}\n")
+            f.write(f"PROMPT: {prompt}\nREPLY: {reply}\n---\n")
+
+    def _log_error(self, provider, prompt, error_msg):
+        with open("ai_query.log", "a") as f:
+            f.write(f"{datetime.datetime.now()} | PROVIDER: {provider} | ERROR\n")
+            f.write(f"PROMPT: {prompt}\nERROR: {error_msg}\n---\n")
     """
     Grid-only provider switcher for FunKit (A/B/C).
     Works with modules.provider_switch.{get_current_provider,set_current_provider,list_labels}.
@@ -98,6 +121,13 @@ class ProviderSwitcher_DEPRECATED(ttk.Frame):
     SLOTS = ("A", "B", "C")
 
     def __init__(self, parent, status_cb=None, **kwargs):
+        # --- AI Provider Dropdown (OpenAI, Baseten) ---
+        self.provider_var = tk.StringVar(value=self.ai.get_provider())
+        self.provider_dropdown = ttk.OptionMenu(
+            self.topbar if hasattr(self, "topbar") else self,
+            self.provider_var, self.ai.get_provider(), *["openai", "baseten"], command=self._on_provider_changed
+        )
+        self.provider_dropdown.pack(side=tk.RIGHT, padx=6)
         super().__init__(parent, **kwargs)
         self.status_cb = status_cb
         self.columnconfigure(2, weight=1)

@@ -133,6 +133,9 @@ def open_memory_dialog(app) -> None:
     ttk.Button(frm_btns, text="Load", command=lambda: load_current()).pack(side="left")
     ttk.Button(frm_btns, text="Save", command=lambda: save_current()).pack(side="left", padx=6)
     ttk.Button(frm_btns, text="Clear", command=lambda: clear_current()).pack(side="left")
+    # Extra Close button for window managers without decoration controls
+    ttk.Button(frm_btns, text="Close", command=lambda: win.destroy()).pack(
+        side="right", padx=(6, 0))
 
     # Preview / Copy buttons (center)
     ttk.Button(frm_btns, text="Preview → Model Text", command=lambda: preview_model_text()).pack(side="left", padx=(12, 6))

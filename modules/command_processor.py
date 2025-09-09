@@ -1,5 +1,6 @@
 # FunKit Command Processor (updated with memory preamble + truncation + adaptive length)
 from __future__ import annotations
+import logging
 
 import os
 import time

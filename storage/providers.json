@@ -15,7 +15,9 @@
       "model": "mistral-7b-instruct",
       "endpoint": "http://127.0.0.1:8081",
       "env_key": null,
-      "extras": { "timeout": 600 }
+      "extras": {
+        "timeout": 600
+      }
     },
     {
       "key": "openai",

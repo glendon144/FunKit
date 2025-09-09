@@ -359,4 +359,14 @@ class TriAIInterface(AIInterface):
     """Backwards-compatible subclass — no changes needed."""
     pass
 
-__all__ = ["AIInterface", "TriAIInterface"]
+
+
+# ---------------------------------------------------------------------------
+# Alias for compatibility with callers expecting Local_AI_Interface
+# ---------------------------------------------------------------------------
+class Local_AI_Interface(AIInterface):
+    """Alias class that defaults to local OpenAI-compatible endpoints.
+    Inherits all behavior from AIInterface."""
+    pass
+
+__all__ = ["AIInterface", "TriAIInterface", "Local_AI_Interface"]

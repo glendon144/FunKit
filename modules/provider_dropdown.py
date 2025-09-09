@@ -8,7 +8,7 @@ class ProviderDropdown(ttk.Frame):
     """
     JSON-backed provider chooser for FunKit.
     Reads/writes storage/providers.json + storage/app_state.json via registry.
-    Calls status_cb(label, model) on change (if provided).
+    Optionally calls status_cb(label, model) when selection changes.
     """
     def __init__(self, parent, status_cb: Optional[Callable[[str, str], None]] = None, **kwargs):
         super().__init__(parent, **kwargs)
@@ -33,6 +33,7 @@ class ProviderDropdown(ttk.Frame):
         self.grid_columnconfigure(1, weight=1)
         self.cbo.bind("<<ComboboxSelected>>", self._on_changed)
 
+        # fire once to populate status/ticker
         self._notify_status()
 
     def current_key(self) -> str:
@@ -50,8 +51,4 @@ class ProviderDropdown(ttk.Frame):
         if not self.status_cb:
             return
         cfg = registry.get(self.current_key())
-        try:
-            self.status_cb(cfg.label, cfg.model)
-        except TypeError:
-            # Fallback for 1-arg callbacks like DemoKitGUI.status(msg)
-            self.status_cb(f"{cfg.label} • {cfg.model}")
+        self.status_cb(cfg.label, cfg.model)
