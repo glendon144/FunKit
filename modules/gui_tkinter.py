@@ -1,11 +1,7 @@
-from modules import inline_webview as _inlineweb
-from modules import opml_nav_helpers as _opmlnav
 from modules.provider_registry import registry
-import mimetypes
 from modules.provider_dropdown import ProviderDropdown
 import os
 import threading
-import logging
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
@@ -15,65 +11,24 @@ import sys
 import json
 import re
 import xml.etree.ElementTree as ET
-from modules.ai_singleton import get_ai, set_provider_global
-# ---- structured logging for AI requests ----
-logger = logging.getLogger("funkit.ai")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    try:
-        _fh = logging.FileHandler("ai_query.log", encoding="utf-8")
-        _fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
-        logger.addHandler(_fh)
-    except Exception:
-        _sh = logging.StreamHandler()
-        _sh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
-        logger.addHandler(_sh)
-# -------------------------------------------
-
-def _bind_provider_hotkeys(self):
-    """Bind convenient shortcuts to switch providers.
-    Ctrl+Alt+L -> Local, Ctrl+Alt+B -> Baseten, Ctrl+Alt+O -> OpenAI
-    """
-    try:
-        self.bind_all('<Control-Alt-l>', lambda e: self._force_provider('local'))
-        self.bind_all('<Control-Alt-b>', lambda e: self._force_provider('baseten'))
-        self.bind_all('<Control-Alt-o>', lambda e: self._force_provider('openai'))
-    except Exception:
-        pass
-
-def _force_provider(self, prov: str):
-    try:
-        from modules.ai_singleton import set_provider_global
-        set_provider_global(prov)
-    except Exception:
-        pass
-    try:
-        if hasattr(self, 'ai') and hasattr(self.ai, 'set_provider'):
-            self.ai.set_provider(prov)
-    except Exception:
-        pass
-    try:
-        if hasattr(self, 'processor') and hasattr(self.processor, 'ai') and hasattr(self.processor.ai, 'set_provider'):
-            self.processor.ai.set_provider(prov)
-    except Exception:
-        pass
-
-
 
 # FunKit modules (all live under ./modules)
 from modules import hypertext_parser, image_generator, document_store
-from modules import aopml_engine
-from modules import image_render
 from modules.renderer import render_binary_as_text
 from modules.logger import Logger
 from modules.directory_import import import_text_files_from_directory
 from modules.TreeView import open_tree_view
-# OPML extras plugin (menu, hotkeys, toolbar buttons, engine helpers)
-from modules.opml_extras_plugin import (
-    install_opml_extras_into_app,
-    _resolve_engine,
-    _decode_bytes_best,
+from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox
+from modules.opml_bridge import (
+    export_current_to_opml,
+    import_opml_file,
+    preview_outline_as_html,
+    open_preview,
+    install_into_app_if_available,   # bridge helper
+    install_opml_extras_into_app,    # alias for old call sites
 )
+
 
 SETTINGS_FILE = Path("funkit_settings.json")
 
@@ -352,59 +307,11 @@ class MarqueeStatusBar(ttk.Frame):
 
 
 class DemoKitGUI(tk.Tk):
-    def _provider_status_cb(self, lbl, mdl):
-        # Map UI label -> internal provider key
-        label = (str(lbl) or '').lower()
-        if 'openai' in label:
-            _prov = 'openai'
-        elif 'baseten' in label or 'mistral' in label:
-            _prov = 'baseten'
-        elif 'local' in label or 'llama' in label:
-            _prov = 'local'
-        else:
-            _prov = 'openai'
+    """FunKit / DemoKit GUI with OPML auto-rendering, provider switcher, URL bar, banner, and utilities."""
 
-        # Remember selection (for UI/logs)
-        self._last_provider_label = str(lbl)
-        self._last_provider_model = str(mdl)
-
-        # Update ticker
-        cb = getattr(self, 'set_ticker_text', None)
-        if callable(cb):
-            cb(f"{lbl} • {mdl}")
-        else:
-            self.status(f"{lbl} • {mdl}")
-
-        # Propagate to the *shared* AI instance and any attached processor
-        try:
-            set_provider_global(_prov)
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'ai') and hasattr(self.ai, 'set_provider'):
-                self.ai.set_provider(_prov)
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'processor') and hasattr(self.processor, 'ai') and hasattr(self.processor.ai, 'set_provider'):
-                self.processor.ai.set_provider(_prov)
-        except Exception:
-            pass
+    SIDEBAR_WIDTH = 320
 
     def __init__(self, doc_store, processor):
-        # --- Ensure GUI constants exist (auto-inserted) ---  ##__GUI_CONST_GUARD__
-        # Use __dict__ to avoid Tkinter __getattr__ recursion
-        if 'SIDEBAR_WIDTH' not in self.__dict__:
-            self.SIDEBAR_WIDTH = 260
-        if 'EDITOR_MINWIDTH' not in self.__dict__:
-            self.EDITOR_MINWIDTH = 480
-        if 'TOPBAR_HEIGHT' not in self.__dict__:
-            self.TOPBAR_HEIGHT = 36
-        # ---------------------------------------------------
-        try: self.bind("<Control-Shift-I>", self._on_import_images_clicked)
-        except Exception: pass
-        try: self.bind("<Control-Shift-E>", self._export_current_images_aware)
-        except Exception: pass
         super().__init__()
         self.doc_store = doc_store
         self.processor = processor
@@ -437,7 +344,7 @@ class DemoKitGUI(tk.Tk):
         self.topbar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         # Provider switch (left)
-        self.provider_switch = ProviderDropdown(self.topbar, status_cb=self._provider_status_cb)
+        self.provider_switch = ProviderDropdown(self.topbar, status_cb=lambda lbl, mdl: getattr(self, 'set_ticker_text', self.status)(f"{lbl} • {mdl}"))
         self.provider_switch.grid(row=0, column=0, sticky="w")
 
         # URL/Search entry (right side)
@@ -474,11 +381,6 @@ class DemoKitGUI(tk.Tk):
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
-        try:
-            filemenu.add_command(label="Import Images...", command=self._on_import_images_clicked)
-            filemenu.add_command(label="Export Image...", command=self._export_current_images_aware)
-        except Exception:
-            pass
 
         # View menu (Tree + OPML depth)
         viewmenu = tk.Menu(menubar, tearoff=0)
@@ -669,22 +571,7 @@ class DemoKitGUI(tk.Tk):
             import re
             EC, BOH, BOT = _resolve_engine()
             if EC is None:
-                import logging, webbrowser
-                logging.warning("AOPML engine not found; falling back to web view")
-                try:
-                    self.marquee_show("AOPML engine not found -> rendering web view")
-                except Exception:
-                    pass
-                try:
-                    self._render_url_in_pane(url)
-                except Exception:
-                    try:
-                        self._render_url_in_pane(url)
-                    except Exception:
-                        (
-                            (self._show_url_in_pane(url) or self._render_with_qt6(url))
-                            if hasattr(self, '_render_with_qt6') else webbrowser.open(url)
-                        )
+                self.after(0, lambda: messagebox.showerror("URL → OPML", "Aopmlengine.py not found."))
                 return
 
             # 1) fetch in background
@@ -730,9 +617,6 @@ class DemoKitGUI(tk.Tk):
     # ---------------- ASK / BACK ----------------
 
     def _handle_ask(self):
-        provider_label = getattr(self, '_last_provider_label', 'unknown')
-        provider_model = getattr(self, '_last_provider_model', '')
-        logger.info("ASK start | provider=%s | model=%s | prompt_len=%s", provider_label, provider_model, len(selected_text) if 'selected_text' in locals() else 'na')
         try:
             start = self.text.index(tk.SEL_FIRST)
             end = self.text.index(tk.SEL_LAST)
@@ -1267,24 +1151,7 @@ class DemoKitGUI(tk.Tk):
         path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
         if not path:
             return
-        # Read as UTF-8 text, or fallback to data:image;base64 for images
-        try:
-            body = Path(path).read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            b = Path(path).read_bytes()
-            mime = self._sniff_image_bytes(b)
-            if mime is None:
-                # Secondary guess by extension
-                import mimetypes as _mt
-                mt, _ = _mt.guess_type(str(path))
-                if mt and mt.startswith("image/"): mime = mt
-            if mime:
-                import base64 as _b64
-                body = f"data:{mime};base64,{_b64.b64encode(b).decode('ascii')}"
-            else:
-                # Non-image binary: re-raise to keep prior behavior/logging
-                raise
-
+        body = Path(path).read_text(encoding="utf-8")
         title = Path(path).stem
         nid = self.doc_store.add_document(title, body)
         self.logger.info(f"Imported {nid}")
@@ -1292,66 +1159,6 @@ class DemoKitGUI(tk.Tk):
         doc = self.doc_store.get_document(nid)
         if doc:
             self._render_document(doc)
-        # Fast-path: if we produced a data-URL image, create a doc now and return
-        if isinstance(body, str) and body.startswith('data:image/'):
-            _doc_id = None
-            _title = None
-            try:
-                from pathlib import Path as _P
-                _title = _P(path).name
-            except Exception:
-                _title = 'image'
-            # Try GUI helpers first
-            for _name in ('create_document','new_document','add_document_here'):
-                _fn = getattr(self, _name, None)
-                if callable(_fn):
-                    try:
-                        _doc_id = _fn(_title, body)
-                        break
-                    except TypeError:
-                        try:
-                            _doc_id = _fn({'title': _title, 'body': body})
-                            break
-                        except Exception:
-                            pass
-            # Then document_store fallbacks
-            if _doc_id is None:
-                try:
-                    from modules import document_store as _ds
-                    for _name in ('create_document','add_document','insert_document','new_document','create','add'):
-                        _fn = getattr(_ds, _name, None)
-                        if callable(_fn):
-                            try:
-                                _doc_id = _fn(_title, body)
-                                break
-                            except TypeError:
-                                try:
-                                    _doc_id = _fn({'title': _title, 'body': body})
-                                    break
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
-            if _doc_id is not None:
-                try:
-                    from tkinter import messagebox as _mb
-                    _mb.showinfo('Import', f'Document {_doc_id} created')
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'reload_index'): self.reload_index()
-                    _tree = getattr(self, 'tree', None)
-                    if _tree:
-                        for _it in _tree.get_children(''):
-                            _vals = _tree.item(_it, 'values')
-                            if _vals and str(_vals[0]) == str(_doc_id):
-                                _tree.selection_set(_it)
-                                _tree.see(_it)
-                                if hasattr(self, 'open_doc_by_id'): self.open_doc_by_id(_doc_id)
-                                break
-                except Exception:
-                    pass
-                return
 
     def _export_doc(self):
         if getattr(self, "current_doc_id", None) is None:
@@ -1628,22 +1435,7 @@ class DemoKitGUI(tk.Tk):
         if self._maybe_render_image_doc(title, body):
             return
 
-        
-        # 2.5) Inline base64 images (image_render)
-        if isinstance(body, str):
-            try:
-                blobs = image_render.extract_image_bytes_all(body)
-            except Exception:
-                blobs = []
-            if blobs:
-                self._hide_opml()
-                # Render images centered inside the Text widget; keep the image pane clear to avoid duplication
-                if image_render.show_images_in_text(self.text, blobs):
-                    if hasattr(self, 'img_label'):
-                        try: self.img_label.configure(image="")
-                        except Exception: pass
-                    return
-# 3) Fallbacks: show as text (avoid giant blobs)
+        # 3) Fallbacks: show as text (avoid giant blobs)
         self._hide_opml()
         self.text.delete("1.0", tk.END)
 
@@ -1705,161 +1497,6 @@ class DemoKitGUI(tk.Tk):
         self._image_enlarged = False
         messagebox.showinfo("Deleted", f"Document {nid} has been deleted.")
 
-    def _sniff_image_bytes(self, b):
-        """Return image MIME type if bytes match a known format, else None."""
-        if not isinstance(b, (bytes, bytearray)):
-            return None
-        hdr = bytes(b[:12])
-        if hdr.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
-        if hdr.startswith(b"\xff\xd8"): return "image/jpeg"
-        if hdr.startswith(b"GIF87a") or hdr.startswith(b"GIF89a"): return "image/gif"
-        if hdr.startswith(b"BM"): return "image/bmp"
-        if len(hdr) >= 12 and hdr[0:4] == b"RIFF" and hdr[8:12] == b"WEBP": return "image/webp"
-        return None
-
-    def _filetypes_images_first(self):
-        return [
-            ("Images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-            ("Text files", "*.txt *.md *.opml *.xml *.html *.htm *.json"),
-            ("All files", "*.*"),
-        ]
-
-    def _data_url_from_path(self, path):
-        from pathlib import Path
-        p = Path(path)
-        b = p.read_bytes()
-        import mimetypes
-        mt, _ = mimetypes.guess_type(p.name)
-        if not mt or not mt.startswith("image/"):
-            if b.startswith(b"\x89PNG\r\n\x1a\n"):
-                mt = "image/png"
-            elif b.startswith(b"\xff\xd8"):
-                mt = "image/jpeg"
-            elif b.startswith(b"GIF87a") or b.startswith(b"GIF89a"):
-                mt = "image/gif"
-            elif b.startswith(b"BM"):
-                mt = "image/bmp"
-            elif len(b) >= 12 and b[0:4] == b"RIFF" and b[8:12] == b"WEBP":
-                mt = "image/webp"
-            else:
-                mt = "application/octet-stream"
-        import base64
-        return "data:" + mt + ";base64," + base64.b64encode(b).decode("ascii")
-
-    def _export_current_images_aware(self, event=None):
-        """Export current doc; if body is data:image;base64, write real bytes."""
-        body = None
-        try:
-            if hasattr(self, "get_current_body") and callable(getattr(self, "get_current_body")):
-                body = self.get_current_body()
-            elif hasattr(self, "text"):
-                body = self.text.get("1.0", "end-1c")
-        except Exception:
-            body = None
-        if not isinstance(body, str) or not body.startswith("data:image/"):
-            if hasattr(self, "_on_export_clicked"):
-                try:
-                    return self._on_export_clicked()
-                except Exception:
-                    pass
-            return
-        import re, base64
-        m = re.match(r"^data:(image/[A-Za-z0-9.+-]+);base64,(.*)$", body, re.S)
-        if not m:
-            if hasattr(self, "_on_export_clicked"):
-                try:
-                    return self._on_export_clicked()
-                except Exception:
-                    pass
-            return
-        mime, b64 = m.groups()
-        extmap = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/bmp": ".bmp", "image/webp": ".webp"}
-        ext = extmap.get(mime, ".bin")
-        from tkinter import filedialog, messagebox
-        fn = filedialog.asksaveasfilename(defaultextension=ext, filetypes=[("All files", "*.*")])
-        if not fn:
-            return
-        try:
-            with open(fn, "wb") as f:
-                f.write(base64.b64decode(b64))
-            try:
-                messagebox.showinfo("Export", "Saved: " + str(fn))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _on_import_images_clicked(self, event=None):
-        from tkinter import filedialog, messagebox
-        paths = filedialog.askopenfilenames(
-            title="Import Images...",
-            filetypes=self._filetypes_images_first()
-        )
-        if not paths:
-            return
-        created = []
-        for path in paths:
-            try:
-                body = self._data_url_from_path(path)
-                try:
-                    from pathlib import Path as _P
-                    title = _P(path).name
-                except Exception:
-                    title = "image"
-                doc_id = None
-                # GUI helpers
-                for name in ("create_document","new_document","add_document_here"):
-                    fn = getattr(self, name, None)
-                    if callable(fn):
-                        try:
-                            doc_id = fn(title, body); break
-                        except TypeError:
-                            try:
-                                doc_id = fn({'title': title, 'body': body}); break
-                            except Exception:
-                                pass
-                if doc_id is None:
-                    try:
-                        from modules import document_store as _ds
-                        for name in ("create_document","add_document","insert_document","new_document","create","add"):
-                            fn = getattr(_ds, name, None)
-                            if callable(fn):
-                                try:
-                                    doc_id = fn(title, body); break
-                                except TypeError:
-                                    try:
-                                        doc_id = fn({'title': title, 'body': body}); break
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-                if doc_id is not None:
-                    created.append(doc_id)
-            except Exception:
-                continue
-        if created:
-            last_id = created[-1]
-            try:
-                messagebox.showinfo("Import", "Document " + str(last_id) + " created")
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "reload_index"):
-                    self.reload_index()
-                tree = getattr(self, "tree", None)
-                if tree:
-                    for it in tree.get_children(""):
-                        vals = tree.item(it, "values")
-                        if vals and str(vals[0]) == str(last_id):
-                            tree.selection_set(it); tree.see(it)
-                            if hasattr(self, "open_doc_by_id"):
-                                self.open_doc_by_id(last_id)
-                            break
-            except Exception:
-                pass
-
-
-
 
 def sanitize_doc(doc):
     if isinstance(doc["body"], bytes):
@@ -1869,221 +1506,4 @@ def sanitize_doc(doc):
             doc["body"] = doc["body"].decode("utf-8", errors="replace")
     return doc
 
-def _sniff_image_bytes(self, b: bytes) -> str | None:
-
-
-    if b.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
-
-
-    if b.startswith(b"\xff\xd8"): return "image/jpeg"
-
-
-    if b.startswith(b"GIF87a") or b.startswith(b"GIF89a"): return "image/gif"
-
-
-    if b.startswith(b"BM"): return "image/bmp"
-
-
-    if len(b) >= 12 and b[0:4] == b"RIFF" and b[8:12] == b"WEBP": return "image/webp"
-
-
-    return None
-
-
-
-    def _sniff_image_bytes(self, b):
-
-
-        """Return image MIME type if bytes match a known format, else None."""
-
-
-        if not isinstance(b, (bytes, bytearray)):
-
-
-            return None
-
-
-        hdr = bytes(b[:12])
-
-
-        if hdr.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
-
-
-        if hdr.startswith(b"\xff\xd8"): return "image/jpeg"
-
-
-        if hdr.startswith(b"GIF87a") or hdr.startswith(b"GIF89a"): return "image/gif"
-
-
-        if hdr.startswith(b"BM"): return "image/bmp"
-
-
-        if len(hdr) >= 12 and hdr[0:4] == b"RIFF" and hdr[8:12] == b"WEBP": return "image/webp"
-
-
-        return None
-
-
-# --- FunKit: inline webpane (tkinterweb) ---
-def _ensure_webpane(self):
-    """
-    Create/reuse an inline HTML viewer backed by tkinterweb.HtmlFrame
-    inside the document/content area. Returns the HtmlFrame or None.
-    """
-    try:
-        if getattr(self, "_webpane", None):
-            return self._webpane
-
-        # Try a few likely container attributes used in FunKit/DemoKit
-        container = None
-        for name in (
-            "document_pane", "doc_container", "document_frame",
-            "right_pane", "content_frame", "main_right", "body"
-        ):
-            container = getattr(self, name, None)
-            if container is not None:
-                break
-
-        # Fall back to 'self' if no specific pane is exposed
-        if container is None:
-            container = self
-
-        from tkinterweb import HtmlFrame  # pip install tkinterweb
-        frame = HtmlFrame(container, messages_enabled=False)
-        # Try to replace/overlay in the pane; pack is used in most builds
-        try:
-            frame.pack(fill="both", expand=True)
-        except Exception:
-            pass
-
-        self._webpane = frame
-        return frame
-    except Exception as _e:
-        import logging; logging.warning("Inline webpane unavailable: %s", _e)
-        return None
-
-def _render_url_in_pane(self, url: str):
-    """
-    Try to display a URL inside the app's document pane.
-    Raises RuntimeError if we can't render inline.
-    """
-    import logging
-    frame = _ensure_webpane(self)
-    if frame is None:
-        raise RuntimeError("inline webpane not available")
-    try:
-        # HtmlFrame API supports .load_website for remote URLs
-        frame.load_website(url)
-        logging.info("Inline webpane: loaded %s", url)
-        return True
-    except Exception as e:
-        logging.exception("Inline webpane failed for %s: %s", url, e)
-        raise
-# ------------------------------------------------------------------
-
-
-# --- FunKit: strong inline webpane ---
-def _get_doc_container(self):
-    """
-    Prefer the parent of the main document Text widget so the web view
-    appears exactly where the document content normally lives.
-    """
-    cand = getattr(self, "document_text", None)
-    if cand is not None and hasattr(cand, "master"):
-        return cand.master
-    for name in ("document_pane","doc_container","document_frame","right_pane","content_frame","main_right","body"):
-        obj = getattr(self, name, None)
-        if obj is not None:
-            return obj
-    return self  # last resort
-
-def _ensure_webpane(self):
-    """
-    Create (or reuse) a tkinterweb.HtmlFrame inside the document container.
-    If a text-based doc widget exists, hide it while the webpane is visible.
-    """
-    import logging
-    try:
-        # Reuse if already present
-        pane = getattr(self, "_webpane", None)
-        if pane: 
-            try:
-                # make sure it's mapped
-                if hasattr(pane, "pack"):
-                    pane.pack(fill="both", expand=True)
-            except Exception:
-                pass
-            # hide text view if present
-            txt = getattr(self, "document_text", None)
-            if txt and hasattr(txt, "pack_forget"):
-                try: txt.pack_forget()
-                except Exception: pass
-            return pane
-
-        container = _get_doc_container(self)
-        # Hide the text document widget if present
-        txt = getattr(self, "document_text", None)
-        if txt and hasattr(txt, "pack_forget"):
-            try: txt.pack_forget()
-            except Exception: pass
-
-        from tkinterweb import HtmlFrame  # pip install tkinterweb
-        pane = HtmlFrame(container, messages_enabled=False)
-        try:
-            pane.pack(fill="both", expand=True)
-        except Exception:
-            pass
-        self._webpane = pane
-        logging.info("Inline webpane created in %r", container)
-        return pane
-    except Exception as e:
-        import logging
-        logging.warning("Inline webpane unavailable: %s", e)
-        return None
-
-def _show_url_in_pane(self, url: str) -> bool:
-    """
-    Try to display URL inline. Returns True if shown inline, False otherwise.
-    """
-    import logging
-    pane = _ensure_webpane(self)
-    if pane is None:
-        logging.info("Inline webpane not available; cannot show %s inline", url)
-        return False
-    try:
-        # HtmlFrame API
-        pane.load_website(url)
-        logging.info("Inline webpane loaded %s", url)
-        return True
-    except Exception as e:
-        logging.exception("Inline webpane failed for %s: %s", url, e)
-        return False
-# ------------------------------------------------------------------
-
-
-# --- FunKit: Qt6 web renderer fallback ---
-def _render_with_qt6(self, url: str):
-    try:
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtCore import QUrl
-        from PyQt6.QtWebEngineWidgets import QWebEngineView
-        import multiprocessing as _mp
-        def _qt_proc(u: str):
-            app = QApplication([])
-            v = QWebEngineView()
-            v.setUrl(QUrl(u))
-            v.resize(1024, 768)
-            v.setWindowTitle("FunKit Web View")
-            v.show()
-            app.exec()
-        p = _mp.Process(target=_qt_proc, args=(url,), daemon=False)
-        p.start()
-    except Exception as e:
-        import webbrowser, logging
-        logging.warning("QT6 unavailable or failed (%s); opening system browser.", e)
-        (
-            self._show_url_in_pane(url)
-            or (hasattr(self, "_render_with_qt6") and (self._render_with_qt6(url) or True))
-            or webbrowser.open(url)
-        )
 
