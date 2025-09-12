@@ -28,26 +28,7 @@ class DocumentStore:
         self.conn.commit()
 
     # Add this method here clearly:
-    def add_document(self, title, body,
-                     created_at=None, updated_at=None,
-                     tags=None, meta=None, **kwargs):
-        """
-        Backwards-compatible:  accept unknown kwargs (e.g., content_type) and 
-        fold supported ones into meta so older DB schemes still work.
-        """
-        # absorb content_type if a caller passes it
-        ct = kwargs.pop("content_type", None)
-        if ct:
-            if meta is None:
-                meta = {}
-            # don't clobber an existing content_type the caller may have put in meta
-            meta.setdefault("content_type", ct)
-
-        # (optional) absorb any otehr future-safe fields here if you like
-        # e.g., bytes_data = kwargs.pop("bytes_data", None) -> store  to blob table, etc.
-
-        # now continue with your existing implementation that writes title/body/timestamps/tags/meta
-        
+    def add_document(self, title, body):
         cur = self.conn.execute(
             "INSERT INTO documents (title, body) VALUES (?, ?)", 
             (title, body)
