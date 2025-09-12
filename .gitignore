@@ -48,3 +48,8 @@ __pycache__/
 # Env files
 .env
 *.env
+
+# Secrets
+baseten.key
+*.key
+.env

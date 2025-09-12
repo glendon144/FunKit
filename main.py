@@ -2,7 +2,7 @@ from pathlib import Path
 from modules.document_store import DocumentStore
 from modules.command_processor import CommandProcessor
 from modules.gui_tkinter import DemoKitGUI
-from modules.ai_interface import AIInterface
+from modules.ai_adapter import AIInterface
 # Plugins
 from modules.memory_dialog  import open_memory_dialog
 from modules.opml_extras_plugin import install_opml_extras_into_app
