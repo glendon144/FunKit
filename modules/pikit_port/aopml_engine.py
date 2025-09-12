@@ -32,7 +32,6 @@ License: MIT
 """
 from __future__ import annotations
 
-
 import os
 import re
 import io
@@ -191,15 +190,23 @@ class _MiniHTMLHeadingParser:
                     self._in_h = None
                     self._buf.clear()
 
-
+    def to_outline(self) -> "Outline":
+        """
+        Convert the collected heading tuples [(level:int, text:str), ...]
+        into a nested Outline tree.
+        """
         root = Outline("Document")
         stack: list[tuple[int, Outline]] = [(0, root)]
+
         for lvl, text in self.headings:
             node = Outline(text)
+            # Pop until parent has strictly lower level
             while stack and lvl <= stack[-1][0]:
                 stack.pop()
-            stack[-1][1].add(node)
+            # Attach to current parent, then push this node
+            stack[-1][1].children.append(node)
             stack.append((lvl, node))
+
         return root
 
 
@@ -459,65 +466,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-
-
-# ---- Convenience: URL -> OPML (appended) ----
-
-
-# ---- Standalone URL -> OPML (no Outline/OPMLDocument deps) ----
-
-# ---- Standalone URL -> OPML (safe docstring) ----
-def url_to_opml(url: str, title_hint: str | None = None) -> str:
-    """
-    Fetch URL, parse headings/links, and return OPML XML string.
-    This avoids using Outline/OPMLDocument so __init__ issues don’t matter.
-    """
-    import urllib.request
-    from xml.etree import ElementTree as ET
-
-    req = urllib.request.Request(url, headers={"User-Agent": "FunKit URL->OPML"})
-    with urllib.request.urlopen(req, timeout=25) as f:
-        raw = f.read()
-    try:
-        html = raw.decode("utf-8", "ignore")
-    except Exception:
-        html = raw.decode("latin-1", "ignore")
-
-    items = []
-    title = title_hint or url
-    try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "html.parser")
-        if soup.title and soup.title.string:
-            t = soup.title.string.strip()
-            if t: title = t
-        for tag in soup.find_all(["h1","h2","h3"]):
-            t = tag.get_text(" ", strip=True).strip()
-            if t: items.append(t)
-        if len(items) < 3:
-            for a in soup.find_all("a"):
-                t = a.get_text(" ", strip=True).strip()
-                if t: items.append(t)
-    except Exception:
-        import re
-        m = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.I|re.S)
-        if m:
-            title = re.sub(r"\s+"," ", m.group(1)).strip() or title
-        texts = re.findall(r"<h[1-3][^>]*>(.*?)</h[1-3]>", html, flags=re.I|re.S)
-        if not texts:
-            texts = re.findall(r"<a[^>]*>(.*?)</a>", html, flags=re.I|re.S)
-        items = [ re.sub(r"<[^>]+>","", t).strip() for t in texts if t.strip() ]
-
-    seen=set(); outline=[]
-    for t in items:
-        if t and t not in seen:
-            seen.add(t); outline.append(t)
-            if len(outline) >= 200: break
-
-    opml = ET.Element("opml", version="2.0")
-    head = ET.SubElement(opml, "head"); ET.SubElement(head, "title").text = title or "Imported"
-    body = ET.SubElement(opml, "body")
-    root = ET.SubElement(body, "outline", text=title or "Imported")
-    for t in outline:
-        ET.SubElement(root, "outline", text=t)
-    return ET.tostring(opml, encoding="utf-8", xml_declaration=True).decode("utf-8")
