@@ -4,7 +4,7 @@ import re
 from modules import logger, ai_interface
 from modules.text_sanitizer import sanitize_ai_reply  
 
-valid_commands = ["NEW", "LIST", "VIEW", "EDIT", "SAVE", "LOAD", "FOLLOW", "LINKS", "ASK", "SUMMARIZE", "SETOPENAI", "HELP", "AUTOLINK", "LOGS"]
+valid_commands = ["NEW", "LIST", "VIEW", "EDIT", "SAVE", "LOAD", "FOLLOW", "LINKS", "ASK", "SUMMARIZE", "SETOPENAI", "HELP", "AUTOLINK", "LOGS", "TALK"]
 
 class CommandProcessor:
     def __init__(self, doc_store):
@@ -43,6 +43,15 @@ class CommandProcessor:
             doc = self.doc_store.get_document(doc_id)
             if doc.empty:
                 print("Document not found.")
+        elif cmd == 'TALK':
+            try:
+                from modules import talk_tui
+                import curses
+                print("Launching Talk TUI... (Ctrl+C to exit)")
+                curses.wrapper(talk_tui.main)
+            except Exception as e:
+                print(f"Error launching Talk TUI: {e}")
+
             else:
                 print(doc.iloc[0]['body'])
 

@@ -1507,3 +1507,19 @@ def sanitize_doc(doc):
     return doc
 
 
+
+
+def launch_talk_tui():
+    """Launch the Piper-based terminal TUI in a child process.""" 
+    try:
+        subprocess.Popen(["python3", "-m", "modules.talk_tui"], close_fds=True)
+    except FileNotFoundError:
+        subprocess.Popen(["python3", "modules/talk_tui.py"], close_fds=True)
+    except Exception as e:
+        print(f"Failed to launch Talk TUI: {e}")
+
+# Hotkey to launch TTS UI
+try:
+    root.bind('<Control-Alt-t>', lambda e: launch_talk_tui())
+except Exception:
+    pass
