@@ -20,6 +20,7 @@ from modules.directory_import import import_text_files_from_directory
 from modules.TreeView import open_tree_view
 from tkinter import filedialog, messagebox
 from tkinter import filedialog, messagebox
+from modules import image_render  # base64/data-URI image renderer
 from modules.opml_bridge import (
     export_current_to_opml,
     import_opml_file,
@@ -95,6 +96,42 @@ def fetch_html_with_fallback(url, max_bytes, connect_to, read_to, budget_s):
 # ---------------------------------------------------------------------
 # Grid-safe ProviderSwitcher (no pack; tolerant of return shapes)
 # ---------------------------------------------------------------------
+# --- image-friendly file reader --------------------------------------------
+import mimetypes
+import base64
+from pathlib import Path
+
+def _read_file_text_or_data_uri(path):
+    """
+    Returns a UTF-8 string. If the file is binary (e.g., PNG/JPG),
+    returns either a data:image/*;base64,... URI (when mime is known)
+    or raw base64 text as a fallback (the image renderer can handle both).
+    """
+    p = Path(path)
+    try:
+        return p.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raw = p.read_bytes()
+        mime, _ = mimetypes.guess_type(p.name)
+        # Minimal magic sniff for common images if extension is missing
+        if not mime:
+            b = raw
+            if b.startswith(b"\x89PNG\r\n\x1a\n"): 
+                mime = "image/png"
+            elif b[:2] == b"\xff\xd8":                
+                mime = "image/jpeg"
+            elif b.startswith(b"GIF87a") or b.startswith(b"GIF89a"): 
+                mime = "image/gif"
+            elif b.startswith(b"BM"):                   
+                mime = "image/bmp"
+            elif b[0:4] == b"RIFF" and b[8:12] == b"WEBP": 
+                mime = "image/webp"
+        b64 = base64.b64encode(raw).decode("ascii")
+        if mime and mime.startswith("image/"):
+            return f"data:{mime};base64,{b64}"
+        # non-image binary → raw base64 (renderer won't treat it as image)
+        return b64
+
 class ProviderSwitcher_DEPRECATED(ttk.Frame):
     """
     Grid-only provider switcher for FunKit (A/B/C).
@@ -417,7 +454,7 @@ class DemoKitGUI(tk.Tk):
     def _load_settings(self) -> dict:
         try:
             if SETTINGS_FILE.exists():
-                return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                return json.loads(_read_file_text_or_data_uri(SETTINGS_FILE))
         except Exception:
             pass
         return {}
@@ -817,7 +854,20 @@ class DemoKitGUI(tk.Tk):
         # 1) built-in first
         if builtin(argv):
             return
-
+# 2.5) Inline base64 images (image_render)
+        if isinstance(locals().get('body'), str):
+            try:
+                blobs = image_render.extract_image_bytes_all(body)
+            except Exception:
+                blobs = []
+            if blobs:
+                self._hide_opml()
+                # Render images centered inside the Text widget; keep the image pane clear to avoid duplication
+                if image_render.show_images_in_text(self.text, blobs):
+                    if hasattr(self, 'img_label'):
+                        try: self.img_label.configure(image="")
+                        except Exception: pass
+                    return
         # 2) legacy commands.py if available
         try:
             from modules import commands as legacy_cmds
@@ -1151,7 +1201,7 @@ class DemoKitGUI(tk.Tk):
         path = filedialog.askopenfilename(title="Import", filetypes=[("Text", "*.txt"), ("All", "*.*")])
         if not path:
             return
-        body = Path(path).read_text(encoding="utf-8")
+        body = _read_file_text_or_data_uri(path)
         title = Path(path).stem
         nid = self.doc_store.add_document(title, body)
         self.logger.info(f"Imported {nid}")
@@ -1375,7 +1425,7 @@ class DemoKitGUI(tk.Tk):
             if isinstance(body, (bytes, bytearray)) and self._is_image_bytes(bytes(body)):
                 self._hide_opml(); self.text.delete("1.0", tk.END)
                 self._show_image_bytes(bytes(body)); return True
-            if isinstance(body, str):
+            if isinstance(locals().get('body'), str):
                 blob = self._try_decode_image_base64(body)
                 if blob and self._is_image_bytes(blob):
                     self._hide_opml(); self.text.delete("1.0", tk.END)
@@ -1397,7 +1447,7 @@ class DemoKitGUI(tk.Tk):
                 self._hide_opml(); self.text.delete("1.0", tk.END)
                 self._show_image_bytes(blob); return True
 
-        if isinstance(body, str):
+        if isinstance(locals().get('body'), str):
             blob = self._try_decode_image_base64(body)
             if blob and self._is_image_bytes(blob):
                 self._hide_opml(); self.text.delete("1.0", tk.END)
@@ -1425,7 +1475,7 @@ class DemoKitGUI(tk.Tk):
             title, body = None, str(doc)
 
         # 1) OPML?
-        if isinstance(body, str):
+        if isinstance(locals().get('body'), str):
             b_norm = body.lstrip("\ufeff\r\n\t ")
             if "<opml" in b_norm.lower():
                 self._render_opml_from_string(b_norm)
