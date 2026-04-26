@@ -121,4 +121,12 @@ fi
 ---
 
 ## License
-TBD
+MIT License
+
+## Skills
+
+FunKit exposes capabiities as callable "skills" located in the `skills/` directory.
+
+Each skill is a self-contained module designed to be invoked by agents (e.g., Claude Code).
+
+see `skills/MIGRATION_PLAN.md` for how commands are being converted into skills.
