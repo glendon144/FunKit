@@ -1,3 +1,11 @@
+Yep — that symptom is almost always **“we’re treating each incoming streamed token as its own *line*.”**
+So the TTS sounds fine (because we *accumulate* before speaking), but the UI looks like a ransom note (because we *don’t* accumulate before printing).
+
+Fix: keep a **stream line buffer** in the UI, append token fragments into it, and only “commit” wrapped lines when they overflow or hit a newline.
+
+Here’s a full updated `talk_tui.py` (same one you said was great), with **only the printing logic fixed** — UI preserved, speech unchanged.
+
+```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -6,6 +14,13 @@ talk_tui.py (bottom→top crawl + debug-audio toggle)
 - Star Wars-style crawl: newest lines appear at the bottom and rise upward
 - F6/F7 = crawl slower/faster; Ctrl+Space/F8 = pause/resume; F9 = logs overlay
 - F12 = toggle "Speak Debug" — numeric/config stream lines are spoken when ON
+- ESC = cancel current generation (keeps UI responsive)
+
+This version preserves the original UI, but fixes:
+- Piper robustness (better CLI compatibility; surfaced failures)
+- UI responsiveness (generation in background thread)
+- Reduced ramble (tighter defaults; optional small context; stop sequences)
+- FIX: Stream text printing (no more one-word-per-line) by accumulating token fragments.
 """
 
 import os, re, sys, json, time, threading, queue, tempfile, subprocess, shutil, curses
@@ -20,14 +35,29 @@ PIPER_BIN      = os.environ.get("PIPER_BIN", "/usr/local/bin/piper/piper")
 PIPER_MODEL    = os.path.expanduser(os.environ.get("PIPER_MODEL", "~/piper-voices/en_US-amy-low.onnx"))
 SOUND_PLAYER   = os.environ.get("SOUND_PLAYER", "")
 
+# Keep UI snappy; you can override via env if desired
 PRINT_MIN_CHARS = int(os.environ.get("PRINT_MIN_CHARS", "24"))
-SPEAK_MIN_CHARS = int(os.environ.get("SPEAK_MIN_CHARS", "100"))
-SPEAK_PAUSE_SEC = float(os.environ.get("SPEAK_PAUSE_SEC", "0.04"))
-MAX_TOKENS     = int(os.environ.get("MAX_TOKENS", "700"))
-TEMPERATURE    = float(os.environ.get("TEMPERATURE", "0.7"))
+SPEAK_MIN_CHARS = int(os.environ.get("SPEAK_MIN_CHARS", "90"))
+SPEAK_PAUSE_SEC = float(os.environ.get("SPEAK_PAUSE_SEC", "0.03"))
+
+# Ramble control defaults (override via env)
+MAX_TOKENS     = int(os.environ.get("MAX_TOKENS", "220"))
+TEMPERATURE    = float(os.environ.get("TEMPERATURE", "0.4"))
+
 ROLL_STYLE     = (os.environ.get("ROLL_STYLE", "box") or "box").strip().lower()
 SAVE_WAV       = os.environ.get("TALK_SAVE_WAV", "0") == "1"
 LOG_FILE_ENV   = os.environ.get("TALK_LOG_FILE", "").strip()
+
+# Generation behaviour
+STREAM_CONNECT_TIMEOUT = float(os.environ.get("STREAM_CONNECT_TIMEOUT", "10"))
+STREAM_READ_TIMEOUT    = float(os.environ.get("STREAM_READ_TIMEOUT", "25"))
+STREAM_STALL_SECONDS   = float(os.environ.get("STREAM_STALL_SECONDS", "12"))
+
+# Minimal continuity (0 = stateless, 1 = include brief recent context)
+CONTEXT_TURNS = int(os.environ.get("CONTEXT_TURNS", "2"))
+
+# TTS normalization
+NORMALIZE_CONTRACTIONS = os.environ.get("NORMALIZE_CONTRACTIONS", "1") == "1"
 
 CRAWL_SPEED_LPS = float(os.environ.get("CRAWL_SPEED_LPS", "0.8"))
 CRAWL_MIN_LPS   = 0.15
@@ -82,18 +112,22 @@ def detect_player():
 PIPER_BIN    = resolve_piper_bin(PIPER_BIN)
 AUDIO_PLAYER = detect_player()
 
-class TokenAccumulator:
-    def __init__(self, min_chars): self.min_chars=min_chars; self.buf=[]
-    def push(self, s):
-        self.buf.append(s); cur="".join(self.buf)
-        if re.search(r'[.!?]\s$', cur) or len(cur)>=self.min_chars:
-            self.buf=[]; return [cur]
-        return []
-    def flush(self):
-        if not self.buf: return []
-        out="".join(self.buf); self.buf=[]; return [out]
+def wrap_to_width(text, width):
+    if width <= 10: return [text]
+    words = re.split(r'(\s+)', text)
+    out=[]; line=""
+    for w in words:
+        if len(line)+len(w) <= width:
+            line += w
+        else:
+            if line:
+                out.append(line.rstrip())
+            line = w.lstrip()
+    if line:
+        out.append(line.rstrip())
+    return out or [""]
 
-def chunk_sentences(txt, max_len=280):
+def chunk_sentences(txt, max_len=240):
     txt=re.sub(r"\s+"," ",txt.strip())
     parts=re.split(r'(?<=[.!?]) +', txt)
     out=[]
@@ -102,23 +136,61 @@ def chunk_sentences(txt, max_len=280):
         if len(s)<=max_len: out.append(s); continue
         buf=[]
         for tok in re.split(r'([,;:])\s*', s):
-            if sum(len(x) for x in buf)+len(tok)<=max_len: buf.append(tok)
+            if sum(len(x) for x in buf)+len(tok)<=max_len:
+                buf.append(tok)
             else:
-                if buf: out.append("".join(buf).strip()); buf=[tok]
-        if buf: out.append("".join(buf).strip())
+                if buf:
+                    out.append("".join(buf).strip())
+                buf=[tok]
+        if buf:
+            out.append("".join(buf).strip())
     return out
 
-def wrap_to_width(text, width):
-    if width <= 10: return [text]
-    words = re.split(r'(\s+)', text)
-    out=[]; line=""
-    for w in words:
-        if len(line)+len(w) <= width: line+=w
-        else:
-            if line: out.append(line.rstrip())
-            line = w.lstrip()
-    if line: out.append(line.rstrip())
-    return out or [""]
+def _normalize_for_tts(s: str) -> str:
+    if not NORMALIZE_CONTRACTIONS:
+        return s
+    reps = {
+        r"\bcan't\b": "cannot",
+        r"\bwon't\b": "will not",
+        r"\bdon't\b": "do not",
+        r"\bdoesn't\b": "does not",
+        r"\bdidn't\b": "did not",
+        r"\bI'm\b": "I am",
+        r"\bI've\b": "I have",
+        r"\bI'll\b": "I will",
+        r"\bit's\b": "it is",
+        r"\bthat's\b": "that is",
+        r"\bthere's\b": "there is",
+        r"\bwe're\b": "we are",
+        r"\bthey're\b": "they are",
+        r"\byou're\b": "you are",
+        r"\bshouldn't\b": "should not",
+        r"\bwouldn't\b": "would not",
+        r"\bcouldn't\b": "could not",
+        r"\bain't\b": "is not",
+    }
+    out = s
+    for pat, rep in reps.items():
+        out = re.sub(pat, rep, out, flags=re.IGNORECASE)
+    return out
+
+class TokenAccumulator:
+    def __init__(self, min_chars):
+        self.min_chars=min_chars
+        self.buf=[]
+    def push(self, s):
+        self.buf.append(s)
+        cur="".join(self.buf)
+        if re.search(r'[.!?]\s$', cur) or len(cur)>=self.min_chars:
+            self.buf=[]
+            return [cur]
+        return []
+    def flush(self):
+        if not self.buf:
+            return []
+        out="".join(self.buf)
+        self.buf=[]
+        return [out]
 
 # =======================
 # Stream filtering
@@ -126,7 +198,7 @@ def wrap_to_width(text, width):
 def _looks_like_debug(s: str) -> bool:
     if not s:
         return True
-    if len(s) > 600:
+    if len(s) > 700:
         return True
     if re.search(r'"(timings|samplers|mirostat|top_p|min_p|temperature|logit_bias|tokens_cached|xtc|n_probs|grammar|dry_|speculative\.)"', s):
         return True
@@ -159,49 +231,14 @@ def _extract_stream(line: str):
     return line, False
 
 # =======================
-# Model I/O
-# =======================
-def stream_model_response(prompt, include_debug=False, timeout=300):
-    try:
-        headers={"Accept":"text/event-stream"}
-        payload={"prompt":prompt,"max_tokens":MAX_TOKENS,"temperature":TEMPERATURE,"stream":True}
-        with requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=timeout) as r:
-            r.raise_for_status()
-            saw=False
-            for raw in r.iter_lines(decode_unicode=True):
-                if not raw: continue
-                saw=True
-                text, is_dbg = _extract_stream(raw.strip())
-                if text is None:
-                    continue
-                if is_dbg and not include_debug:
-                    continue
-                yield (text, bool(is_dbg))
-            if not saw: return
-        return
-    except Exception:
-        return
-
-def fetch_full_response(prompt, timeout=300):
-    r=requests.post(API_URL, json={"prompt":prompt,"max_tokens":MAX_TOKENS,"temperature":TEMPERATURE}, timeout=timeout)
-    r.raise_for_status()
-    try: obj=r.json()
-    except Exception: return r.text.strip()
-    if isinstance(obj, dict):
-        if "content" in obj: return str(obj["content"]).strip()
-        if "choices" in obj and obj["choices"]:
-            msg=obj["choices"][0].get("message") or {}
-            return str(msg.get("content","")).strip()
-    return str(obj).strip()
-
-# =======================
 # Logs
 # =======================
 def get_log_file():
     if LOG_FILE_ENV:
         return LOG_FILE_ENV, False
     tmp = tempfile.NamedTemporaryFile(prefix="talk_tui_", suffix=".log", delete=False)
-    path = tmp.name; tmp.close()
+    path = tmp.name
+    tmp.close()
     return path, True
 
 LOG_PATH, LOG_IS_TEMP = get_log_file()
@@ -221,6 +258,10 @@ def tail_file(path, max_bytes=200_000):
     except Exception:
         return ["<no log data>"]
 
+def tail_file_last(path, n=25):
+    lines = tail_file(path)
+    return lines[-n:] if len(lines) > n else lines
+
 # =======================
 # Piper TTS
 # =======================
@@ -236,19 +277,26 @@ class PiperTTSWorker(threading.Thread):
 
     def _status(self, msg):
         if self.status_q:
-            try: self.status_q.put_nowait(msg)
-            except: pass
+            try:
+                self.status_q.put_nowait(msg)
+            except:
+                pass
 
     def _play_wav(self, path):
         pl = AUDIO_PLAYER
         if not pl:
             self._status("Audio: no player (set SOUND_PLAYER=ffplay|paplay|aplay|afplay)")
             return
-        if pl == "aplay":   cmd = ["aplay", "-q", path]
-        elif pl == "paplay":cmd = ["paplay", path]
-        elif pl == "afplay":cmd = ["afplay", path]
-        elif pl == "ffplay":cmd = ["ffplay", "-autoexit", "-nodisp", "-hide_banner", "-loglevel", "error", path]
-        else:               cmd = [pl, path]
+        if pl == "aplay":
+            cmd = ["aplay", "-q", path]
+        elif pl == "paplay":
+            cmd = ["paplay", path]
+        elif pl == "afplay":
+            cmd = ["afplay", path]
+        elif pl == "ffplay":
+            cmd = ["ffplay", "-autoexit", "-nodisp", "-hide_banner", "-loglevel", "error", path]
+        else:
+            cmd = [pl, path]
         io = proc_io_redirects()
         try:
             subprocess.run(cmd, check=True, stdout=io["stdout"], stderr=io["stderr"])
@@ -257,47 +305,187 @@ class PiperTTSWorker(threading.Thread):
         finally:
             io["_log_handle"].close()
 
+    def _run_piper(self, args, text):
+        io = proc_io_redirects()
+        try:
+            subprocess.run(args, input=text.encode("utf-8"), check=True,
+                           stdout=io["stdout"], stderr=io["stderr"])
+            return True, None
+        except subprocess.CalledProcessError as e:
+            return False, f"Piper failed ({e.returncode})"
+        except FileNotFoundError:
+            return False, "piper not found (check PIPER_BIN)"
+        except Exception as e:
+            return False, f"TTS err: {e}"
+        finally:
+            io["_log_handle"].close()
+
     def _synthesize_to_wav(self, text):
         tmp = tempfile.NamedTemporaryFile(prefix="piper_", suffix=".wav", delete=False)
         wav = tmp.name
         tmp.close()
-        io = proc_io_redirects()
-        try:
-            subprocess.run([self.bin_path, "-m", self.model_path, "-f", wav],
-                           input=text.encode("utf-8"), check=True,
-                           stdout=io["stdout"], stderr=io["stderr"])
-            return wav
-        except subprocess.CalledProcessError as e:
-            self._status(f"Piper failed ({e.returncode})")
-        except FileNotFoundError:
-            self._status("piper not found (check PIPER_BIN)")
-        except Exception as e:
-            self._status(f"TTS err: {e}")
-        finally:
-            io["_log_handle"].close()
-        return None
+
+        tts_text = _normalize_for_tts(text)
+
+        ok, err = self._run_piper([self.bin_path, "-m", self.model_path, "--output_file", wav], tts_text)
+        if not ok:
+            ok2, err2 = self._run_piper([self.bin_path, "-m", self.model_path, "-f", wav], tts_text)
+            if not ok2:
+                self._status(err2 or err or "Piper failed")
+                last = tail_file_last(LOG_PATH, n=6)
+                if last:
+                    self._status("Piper log tail: " + " | ".join(last[-3:]))
+                try:
+                    os.remove(wav)
+                except Exception:
+                    pass
+                return None
+
+        return wav
 
     def _speak_chunk(self, text):
-        if not text: return
+        if not text:
+            return
         wav = self._synthesize_to_wav(text)
-        if not wav: return
+        if not wav:
+            return
         try:
             self._play_wav(wav)
         finally:
             if not SAVE_WAV:
-                try: os.remove(wav)
-                except: pass
+                try:
+                    os.remove(wav)
+                except:
+                    pass
 
     def run(self):
         while not self._stop.is_set():
-            try: chunk = self.q.get(timeout=0.1)
-            except queue.Empty: continue
-            if chunk is None: break
+            try:
+                chunk = self.q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
             self._speak_chunk(chunk)
             time.sleep(self.pause)
             self.q.task_done()
 
-    def stop(self): self._stop.set()
+    def stop(self):
+        self._stop.set()
+
+# =======================
+# Generation worker (keeps UI responsive)
+# =======================
+class GenerationWorker(threading.Thread):
+    """
+    Sends events into out_q:
+      ("token", text, is_dbg)
+      ("done", None, None)
+      ("error", message, None)
+    """
+    def __init__(self, prompt, out_q, include_debug=False, cancel_event=None, history=None):
+        super().__init__(daemon=True)
+        self.prompt = prompt
+        self.out_q = out_q
+        self.include_debug = include_debug
+        self.cancel = cancel_event or threading.Event()
+        self.history = history or deque(maxlen=12)
+
+    def _emit(self, kind, a=None, b=None):
+        try:
+            self.out_q.put_nowait((kind, a, b))
+        except:
+            pass
+
+    def _build_prompt(self):
+        if CONTEXT_TURNS <= 0 or not self.history:
+            return self.prompt
+        turns = list(self.history)[-CONTEXT_TURNS*2:]
+        ctx = []
+        for role, msg in turns:
+            if role == "user":
+                ctx.append(f"User: {msg}")
+            else:
+                ctx.append(f"Assistant: {msg}")
+        ctx_txt = "\n".join(ctx).strip()
+        if ctx_txt:
+            return (
+                "You are a concise assistant. Answer the user's latest message clearly and briefly.\n\n"
+                f"{ctx_txt}\n"
+                f"User: {self.prompt}\n"
+                "Assistant:"
+            )
+        return self.prompt
+
+    def run(self):
+        prompt = self._build_prompt()
+        headers = {"Accept": "text/event-stream"}
+        payload = {
+            "prompt": prompt,
+            "max_tokens": MAX_TOKENS,
+            "temperature": TEMPERATURE,
+            "stream": True,
+            "stop": ["\nUser:", "\nAssistant:", "</s>", "###"]
+        }
+
+        timeout = (STREAM_CONNECT_TIMEOUT, STREAM_READ_TIMEOUT)
+        last_rx = time.time()
+
+        try:
+            with requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=timeout) as r:
+                r.raise_for_status()
+                saw_any = False
+                for raw in r.iter_lines(decode_unicode=True):
+                    if self.cancel.is_set():
+                        break
+                    now = time.time()
+                    if now - last_rx > STREAM_STALL_SECONDS:
+                        break
+                    if not raw:
+                        continue
+                    last_rx = now
+                    saw_any = True
+                    text, is_dbg = _extract_stream(raw.strip())
+                    if text is None:
+                        continue
+                    if is_dbg and not self.include_debug:
+                        continue
+                    self._emit("token", text, bool(is_dbg))
+
+                if not saw_any and not self.cancel.is_set():
+                    reply = self._fetch_full(prompt)
+                    if reply:
+                        self._emit("token", reply, False)
+
+        except Exception as e:
+            if not self.cancel.is_set():
+                self._emit("error", f"Model error: {e}", None)
+        finally:
+            self._emit("done", None, None)
+
+    def _fetch_full(self, prompt):
+        try:
+            r = requests.post(
+                API_URL,
+                json={"prompt": prompt, "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE,
+                      "stop": ["\nUser:", "\nAssistant:", "</s>", "###"]},
+                timeout=(STREAM_CONNECT_TIMEOUT, STREAM_READ_TIMEOUT),
+            )
+            r.raise_for_status()
+            try:
+                obj = r.json()
+            except Exception:
+                return r.text.strip()
+
+            if isinstance(obj, dict):
+                if "content" in obj:
+                    return str(obj["content"]).strip()
+                if "choices" in obj and obj["choices"]:
+                    msg = obj["choices"][0].get("message") or {}
+                    return str(msg.get("content", "")).strip()
+            return str(obj).strip()
+        except Exception:
+            return None
 
 # =======================
 # UI
@@ -314,6 +502,10 @@ class TalkUI:
         self.tokens = deque(maxlen=500)
         self.rolling_lines = deque(maxlen=400)
         self.lock = threading.Lock()
+
+        # FIX: stream fragment buffer so tokens print like normal text
+        self._token_partial = ""
+
         curses.curs_set(1)
         self.stdscr.nodelay(False)
         self.stdscr.keypad(True)
@@ -361,12 +553,33 @@ class TalkUI:
         y0 = self.title_h
         _safe_addstr(self.stdscr, y0, 0, " Stream ", curses.A_BOLD)
         self.stdscr.hline(y0 + 1, 0, curses.ACS_HLINE, self.w - 1)
-        lines = list(self.tokens)[-(self.tokens_h - 2):]
+
+        # FIX: include the in-progress partial line in what we display
+        with self.lock:
+            lines_all = list(self.tokens)
+            if self._token_partial:
+                # wrap partial for display without committing it
+                width = max(12, self.w - 4)
+                partial_lines = wrap_to_width(self._token_partial, width)
+                lines_all = lines_all + partial_lines
+
+        lines = lines_all[-(self.tokens_h - 2):]
         y = y0 + 2
         for line in lines:
             _safe_addnstr(self.stdscr, y, 1, line, self.w - 3)
             y += 1
         self.stdscr.hline(y0 + self.tokens_h, 0, curses.ACS_HLINE, self.w - 1)
+
+    def draw_roll_box(self):
+        y0 = self.title_h + self.tokens_h + 1
+        _safe_addstr(self.stdscr, y0, 0, " Now Speaking ", curses.A_BOLD)
+        self.stdscr.hline(y0 + 1, 0, curses.ACS_HLINE, self.w - 1)
+        lines = list(self.rolling_lines)[-(self.roll_h - 2):]
+        y = y0 + 2
+        for line in lines:
+            _safe_addnstr(self.stdscr, y, 2, line, self.w - 4)
+            y += 1
+        self.stdscr.hline(y0 + self.roll_h, 0, curses.ACS_HLINE, self.w - 1)
 
     def _style_crawl_line(self, text, depth_ratio):
         max_spacing = 1
@@ -417,7 +630,6 @@ class TalkUI:
         visible = lines_full[start:end]
 
         bottom_pad = 1 if off_frac > 0.001 and len(visible) >= inner_h else 0
-
         panel_bottom = y0 + self.roll_h - 1
 
         y = panel_bottom
@@ -440,21 +652,10 @@ class TalkUI:
 
         self.stdscr.hline(y0 + self.roll_h, 0, curses.ACS_HLINE, self.w - 1)
 
-    def draw_roll_box(self):
-        y0 = self.title_h + self.tokens_h + 1
-        _safe_addstr(self.stdscr, y0, 0, " Now Speaking ", curses.A_BOLD)
-        self.stdscr.hline(y0 + 1, 0, curses.ACS_HLINE, self.w - 1)
-        lines = list(self.rolling_lines)[-(self.roll_h - 2):]
-        y = y0 + 2
-        for line in lines:
-            _safe_addnstr(self.stdscr, y, 2, line, self.w - 4)
-            y += 1
-        self.stdscr.hline(y0 + self.roll_h, 0, curses.ACS_HLINE, self.w - 1)
-
     def draw_input(self, buf):
         y = self.h - self.input_h
-        hint_full  = "  (Enter=send, /style box|crawl, F5=test, F9=logs, F12=speak-debug, F6/7=speed, Ctrl+Space/F8=pause, /quit=exit)"
-        hint_short = "  (Enter, /quit)"
+        hint_full  = "  (Enter=send, /style box|crawl, /reset, F5=test, F9=logs, F12=speak-debug, F6/7=speed, Ctrl+Space/F8=pause, ESC=cancel, /quit=exit)"
+        hint_short = "  (Enter, ESC, /quit)"
         min_prompt_cols = 20
 
         if self.w - 1 < min_prompt_cols + len(hint_short):
@@ -475,10 +676,33 @@ class TalkUI:
         except curses.error:
             pass
 
+    # -------- FIXED --------
+    # add_token_text now treats input as a fragment and accumulates it.
     def add_token_text(self, text):
         with self.lock:
-            for line in wrap_to_width(text, self.w - 4):
-                self.tokens.append(line)
+            width = max(12, self.w - 4)
+            t = (text or "").replace("\r", "")
+
+            # If fragment contains explicit newlines, commit lines up to newline.
+            parts = t.split("\n")
+            for i, part in enumerate(parts):
+                if part:
+                    self._token_partial += part
+
+                # Wrap what we have; commit all but last line.
+                wrapped = wrap_to_width(self._token_partial, width)
+                if len(wrapped) > 1:
+                    for ln in wrapped[:-1]:
+                        self.tokens.append(ln)
+                    self._token_partial = wrapped[-1]
+                elif wrapped:
+                    self._token_partial = wrapped[0]
+
+                # Newline boundary: commit current partial as a line and start fresh.
+                if i < len(parts) - 1:
+                    if self._token_partial:
+                        self.tokens.append(self._token_partial.rstrip())
+                    self._token_partial = ""
 
     def add_roll_phrase(self, phrase):
         with self.lock:
@@ -501,6 +725,14 @@ class TalkUI:
         self.draw_input(input_buf)
         self.stdscr.refresh()
 
+    def stream_tail_text_for_history(self, max_lines=24):
+        """Best-effort tail including the partial line."""
+        with self.lock:
+            lines = list(self.tokens)[-max_lines:]
+            if self._token_partial:
+                lines = lines + [self._token_partial]
+        return " ".join(lines)
+
 # =======================
 # Log Viewer
 # =======================
@@ -519,14 +751,16 @@ class LogViewer:
         self.cache = tail_file(self.path)
 
     def scroll(self, delta, page=0):
-        if not self.visible: return
+        if not self.visible:
+            return
         if page:
             self.offset = max(0, self.offset + page)
         else:
             self.offset = max(0, self.offset + delta)
 
     def draw(self, stdscr):
-        if not self.visible: return
+        if not self.visible:
+            return
         h, w = stdscr.getmaxyx()
         box_h = max(6, int(h * 0.8))
         y0 = (h - box_h) // 2
@@ -549,6 +783,7 @@ class LogViewer:
 # =======================
 def main(stdscr):
     curses.use_default_colors()
+
     piper_dir = os.path.dirname(PIPER_BIN)
     if os.path.isdir(piper_dir):
         os.environ["LD_LIBRARY_PATH"] = f"{piper_dir}:{os.environ.get('LD_LIBRARY_PATH','')}"
@@ -559,19 +794,25 @@ def main(stdscr):
     speak_q  = queue.Queue()
     status_q = queue.Queue()
 
-    tts = PiperTTSWorker(speak_q, status_q=status_q); tts.start()
+    tts = PiperTTSWorker(speak_q, status_q=status_q)
+    tts.start()
 
-    input_buf=""
-    printing_acc = TokenAccumulator(PRINT_MIN_CHARS)
+    gen_out_q = queue.Queue()
+    gen_thread = None
+    gen_cancel = threading.Event()
+
+    history = deque(maxlen=24)
+
+    input_buf = ""
     speaking_acc = TokenAccumulator(SPEAK_MIN_CHARS)
-    debug_acc    = TokenAccumulator(80)   # tighter chunks for numeric/debug "music"
-    speak_debug  = False                  # Speak Debug toggle
+    debug_acc    = TokenAccumulator(80)
+    speak_debug  = False
 
     def set_status(s):
-        try: status_q.put_nowait(s)
-        except queue.Full: pass
-
-    set_status(f"API={API_URL} | Piper={PIPER_BIN} | Voice={PIPER_MODEL} | Player={AUDIO_PLAYER or 'none'} | Style={ROLL_STYLE} | Log={LOG_PATH} | SpeakDebug={speak_debug}")
+        try:
+            status_q.put_nowait(s)
+        except queue.Full:
+            pass
 
     def redraw(status=""):
         ui.render(input_buf, status=status)
@@ -579,10 +820,68 @@ def main(stdscr):
             logs.refresh_cache(); logs.draw(stdscr)
         stdscr.refresh()
 
+    set_status(
+        f"API={API_URL} | Piper={PIPER_BIN} | Voice={PIPER_MODEL} | Player={AUDIO_PLAYER or 'none'} | "
+        f"Style={ROLL_STYLE} | MaxTok={MAX_TOKENS} Temp={TEMPERATURE} | Log={LOG_PATH}"
+    )
+
+    def start_generation(user_text):
+        nonlocal gen_thread
+        if gen_thread and gen_thread.is_alive():
+            set_status("Busy: press ESC to cancel current generation.")
+            return
+        gen_cancel.clear()
+        gen_thread = GenerationWorker(
+            user_text,
+            out_q=gen_out_q,
+            include_debug=speak_debug,
+            cancel_event=gen_cancel,
+            history=history,
+        )
+        gen_thread.start()
+        set_status("Streaming... (ESC cancels)")
+        ui.add_token_text("AI: ")
+        redraw("Streaming...")
+
     while True:
-        status=""
+        status = ""
         try:
-            while True: status=status_q.get_nowait()
+            while True:
+                status = status_q.get_nowait()
+        except queue.Empty:
+            pass
+
+        # Drain generation output
+        try:
+            while True:
+                kind, a, b = gen_out_q.get_nowait()
+                if kind == "token":
+                    frag = a or ""
+                    is_dbg = bool(b)
+                    vis_text = (DEBUG_PREFIX + frag) if is_dbg else frag
+
+                    # FIXED printing: add_token_text accumulates fragments now
+                    ui.add_token_text(vis_text)
+
+                    acc = debug_acc if is_dbg else speaking_acc
+                    for phrase in acc.push(frag):
+                        ui.add_roll_phrase(phrase if not is_dbg else (DEBUG_PREFIX + phrase))
+                        speak_q.put(phrase)
+
+                elif kind == "error":
+                    ui.add_roll_phrase(str(a))
+                    set_status(str(a))
+
+                elif kind == "done":
+                    for phrase in speaking_acc.flush():
+                        ui.add_roll_phrase(phrase)
+                        speak_q.put(phrase)
+                    for phrase in debug_acc.flush():
+                        ui.add_roll_phrase(DEBUG_PREFIX + phrase)
+                        if speak_debug:
+                            speak_q.put(phrase)
+                    set_status("Ready.")
+                gen_out_q.task_done()
         except queue.Empty:
             pass
 
@@ -597,6 +896,14 @@ def main(stdscr):
             break
 
         if ch == curses.KEY_RESIZE:
+            continue
+
+        # ESC cancels current generation
+        if ch == 27:
+            if gen_thread and gen_thread.is_alive():
+                gen_cancel.set()
+                set_status("Canceled. Ready.")
+                redraw("Ready.")
             continue
 
         if ch == curses.KEY_F5:
@@ -658,11 +965,13 @@ def main(stdscr):
 
         if ch in (10, 13):
             text = input_buf.strip()
-            input_buf=""
+            input_buf = ""
             if not text:
                 continue
+
             if text.lower() == "/quit":
                 break
+
             if text.lower().startswith("/style"):
                 _, _, style = text.partition(" ")
                 style = (style or "").strip().lower()
@@ -678,43 +987,14 @@ def main(stdscr):
                 redraw()
                 continue
 
-            set_status(f"Streaming... SpeakDebug={'on' if speak_debug else 'off'}")
-            redraw("Streaming...")
+            if text.lower() == "/reset":
+                history.clear()
+                set_status("Context cleared.")
+                redraw()
+                continue
 
-            streamed = stream_model_response(text, include_debug=speak_debug)
-
-            if streamed is not None:
-                ui.add_token_text("AI: ")
-                redraw("Streaming...")
-                for frag, is_dbg in streamed:
-                    vis_text = (DEBUG_PREFIX + frag) if is_dbg else frag
-                    ui.add_token_text(vis_text)
-                    acc = debug_acc if is_dbg else speaking_acc
-                    for phrase in acc.push(frag):
-                        ui.add_roll_phrase(phrase if not is_dbg else (DEBUG_PREFIX + phrase))
-                        speak_q.put(phrase)
-                    redraw("Streaming...")
-                    time.sleep(0.005)
-                for phrase in speaking_acc.flush():
-                    ui.add_roll_phrase(phrase)
-                    speak_q.put(phrase)
-                    redraw("Streaming...")
-                for phrase in debug_acc.flush():
-                    ui.add_roll_phrase(DEBUG_PREFIX + phrase)
-                    speak_q.put(phrase)
-                    redraw("Streaming...")
-                set_status("Ready.")
-                redraw("Ready.")
-            else:
-                reply = fetch_full_response(text)
-                ui.add_token_text("AI: " + reply)
-                redraw("Speaking...")
-                for sent in chunk_sentences(reply):
-                    ui.add_roll_phrase(sent)
-                    speak_q.put(sent)
-                    redraw("Speaking...")
-                set_status("Ready.")
-                redraw("Ready.")
+            history.append(("user", text))
+            start_generation(text)
             continue
 
         if ch != -1:
@@ -725,10 +1005,17 @@ def main(stdscr):
             except Exception:
                 pass
 
-    speak_q.put(None); tts.stop(); tts.join()
+        # Store compact assistant reply after generation ends (best effort)
+        if gen_thread and (not gen_thread.is_alive()) and len(history) > 0:
+            if not history or history[-1][0] != "assistant":
+                reply = ui.stream_tail_text_for_history(max_lines=24).replace("AI:", "").strip()
+                if reply:
+                    reply = re.sub(r"\s+", " ", reply)[-900:]
+                    history.append(("assistant", reply))
 
-# =======================
-# Entry
-# =======================
+    speak_q.put(None)
+    tts.stop()
+    tts.join()
+
 if __name__ == "__main__":
     curses.wrapper(main)
