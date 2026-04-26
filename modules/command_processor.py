@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Tuple
@@ -366,72 +367,65 @@ class CommandProcessor:
         content = Path(path).read_text(encoding="utf-8", errors="replace")
         title = Path(path).stem
         return self.doc_store.add_document(title, content)
-     # --- OPML: helpers for string / URL / crawler -------------------------------
-import os
-import tempfile
 
-def import_opml_from_string(self, xml_text: str, source: str = "") -> int:
-    """
-    Import an OPML document provided as a string.
-    Bridges to import_opml_from_path by writing to a temp file.
-    Returns: new document id.
-    """
-    # choose a safe temp dir under storage if available
-    base_tmp = getattr(self, "storage_dir", None)
-    if not base_tmp:
-        base_tmp = os.path.join(os.getcwd(), "storage")
-    os.makedirs(base_tmp, exist_ok=True)
+    # --- OPML: helpers for string / URL / crawler -------------------------------
 
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="opml_", suffix=".opml",
-                                     dir=base_tmp, delete=False) as tf:
-        tf.write(xml_text)
-        tmp_path = tf.name
+    def import_opml_from_string(self, xml_text: str, source: str = "") -> int:
+        """Import an OPML document provided as a string.
 
-    # Optionally you could record 'source' somewhere if your importer supports it
-    try:
-        new_id = self.import_opml_from_path(tmp_path)
-        return new_id
-    finally:
-        # Keep the temp file if your importer needs it later; otherwise uncomment:
-        # try: os.remove(tmp_path)
-        # except Exception: pass
-        pass
+        Bridges to import_opml_from_path via a temp file.
+        Returns: new document id.
+        """
+        base_tmp = getattr(self, "storage_dir", None)
+        if not base_tmp:
+            base_tmp = os.path.join(os.getcwd(), "storage")
+        os.makedirs(base_tmp, exist_ok=True)
 
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix="opml_", suffix=".opml",
+            dir=base_tmp, delete=False,
+        ) as tf:
+            tf.write(xml_text)
+            tmp_path = tf.name
 
-def import_opml_from_url(self, url: str, timeout: int = 15) -> int:
-    """
-    Fetch an OPML from URL and import it.
-    """
-    try:
-        import requests
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "FunKit/OPML-Importer"})
-        r.raise_for_status()
-        xml_text = r.text
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch OPML from URL: {e}")
-    return self.import_opml_from_string(xml_text, source=url)
-
-
-def crawl_opml_and_import(self, start: str, max_depth: int = 2) -> list[int]:
-    """
-    Crawl an OPML seed (URL or local path), gather linked OPMLs, and import each.
-    Returns the list of new document IDs.
-    """
-    try:
-        from modules.opml_crawler_adapter import crawl_opml
-    except Exception as e:
-        raise RuntimeError(f"OPML crawler not available: {e}")
-
-    results = crawl_opml(start, max_depth=max_depth)
-    new_ids: list[int] = []
-    for src, xml_text in results:
         try:
-            new_id = self.import_opml_from_string(xml_text, source=src)
-            new_ids.append(new_id)
+            return self.import_opml_from_path(tmp_path)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    def import_opml_from_url(self, url: str, timeout: int = 15) -> int:
+        """Fetch an OPML from URL and import it."""
+        try:
+            import requests
+            r = requests.get(url, timeout=timeout, headers={"User-Agent": "FunKit/OPML-Importer"})
+            r.raise_for_status()
+            xml_text = r.text
         except Exception as e:
-            print(f"[opml] import failed for {src}: {e}")
-    return new_ids
- 
+            raise RuntimeError(f"Failed to fetch OPML from URL: {e}")
+        return self.import_opml_from_string(xml_text, source=url)
+
+    def crawl_opml_and_import(self, start: str, max_depth: int = 2) -> list[int]:
+        """Crawl an OPML seed (URL or local path), gather linked OPMLs, and import each.
+
+        Returns the list of new document IDs.
+        """
+        try:
+            from modules.opml_crawler_adapter import crawl_opml
+        except Exception as e:
+            raise RuntimeError(f"OPML crawler not available: {e}")
+
+        results = crawl_opml(start, max_depth=max_depth)
+        new_ids: list[int] = []
+        for src, xml_text in results:
+            try:
+                new_id = self.import_opml_from_string(xml_text, source=src)
+                new_ids.append(new_id)
+            except Exception as e:
+                print(f"[opml] import failed for {src}: {e}")
+        return new_ids
 
     def import_directory(self, directory: str) -> None:
         """Bulk-import text files from a directory."""
