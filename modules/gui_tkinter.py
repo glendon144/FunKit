@@ -14,8 +14,6 @@ import xml.etree.ElementTree as ET
 
 # FunKit modules (all live under ./modules)
 from modules import hypertext_parser, image_generator, document_store
-from modules.network_utils import fetch_html_with_fallback
-from modules.ui_components import MarqueeStatusBar
 from modules.renderer import render_binary_as_text
 from modules.logger import Logger
 from modules.directory_import import import_text_files_from_directory
@@ -32,11 +30,84 @@ from modules.opml_bridge import (
     install_opml_extras_into_app,    # alias for old call sites
 )
 
+# --- Tokens panel + ticker (safe imports with fallbacks) --------------------
+try:
+    from modules.tokens_panel import TokensPanel  # user-provided panel
+except Exception:
+    TokensPanel = None  # optional
+
+try:
+    # preferred path if tokens lives under modules/tokens/
+    from modules.tokens.ticker import attach_ticker  # type: ignore
+except Exception:
+    try:
+        # fallback if ticker is in modules/ticker.py
+        from modules.ticker import attach_ticker  # type: ignore
+    except Exception:
+        def attach_ticker(*_args, **_kwargs):  # no-op fallback
+            return None
+
 
 SETTINGS_FILE = Path("funkit_settings.json")
 
 
 # ---- network helper (thread-safe: no Tk/SQLite here) ----
+def fetch_html_with_fallback(url, max_bytes, connect_to, read_to, budget_s):
+    """Do the network I/O only. Returns decoded HTML as str."""
+    import time, socket
+    start = time.monotonic()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 FunKit/OPML",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "close",
+    }
+
+    # Try requests if available
+    try:
+        import requests
+        with requests.get(url, headers=headers, timeout=(connect_to, read_to),
+                          stream=True, allow_redirects=True) as r:
+            r.raise_for_status()
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "text/html" not in ctype and "xml" not in ctype:
+                raise RuntimeError(f"Unsupported Content-Type: {ctype or 'unknown'}")
+            raw = bytearray()
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk:
+                    raw.extend(chunk)
+                if len(raw) > max_bytes or (time.monotonic() - start) > budget_s:
+                    break
+        return _decode_bytes_best(bytes(raw))
+    except Exception:
+        pass
+
+    # Fallback: urllib
+    import urllib.request
+    old_t = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(read_to)
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=connect_to) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "text/html" not in ctype and "xml" not in ctype:
+                raise RuntimeError(f"Unsupported Content-Type: {ctype or 'unknown'}")
+            raw = bytearray()
+            while True:
+                if (time.monotonic() - start) > budget_s:
+                    break
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if len(raw) > max_bytes:
+                    break
+    finally:
+        socket.setdefaulttimeout(old_t)
+
+    return _decode_bytes_best(bytes(raw))
 
 
 # ---------------------------------------------------------------------
@@ -62,15 +133,15 @@ def _read_file_text_or_data_uri(path):
         # Minimal magic sniff for common images if extension is missing
         if not mime:
             b = raw
-            if b.startswith(b"\x89PNG\r\n\x1a\n"): 
+            if b.startswith(b"\x89PNG\r\n\x1a\n"):
                 mime = "image/png"
-            elif b[:2] == b"\xff\xd8":                
+            elif b[:2] == b"\xff\xd8":
                 mime = "image/jpeg"
-            elif b.startswith(b"GIF87a") or b.startswith(b"GIF89a"): 
+            elif b.startswith(b"GIF87a") or b.startswith(b"GIF89a"):
                 mime = "image/gif"
-            elif b.startswith(b"BM"):                   
+            elif b.startswith(b"BM"):
                 mime = "image/bmp"
-            elif b[0:4] == b"RIFF" and b[8:12] == b"WEBP": 
+            elif b[0:4] == b"RIFF" and b[8:12] == b"WEBP":
                 mime = "image/webp"
         b64 = base64.b64encode(raw).decode("ascii")
         if mime and mime.startswith("image/"):
@@ -78,10 +149,215 @@ def _read_file_text_or_data_uri(path):
         # non-image binary → raw base64 (renderer won't treat it as image)
         return b64
 
+class ProviderSwitcher_DEPRECATED(ttk.Frame):
+    """
+    Grid-only provider switcher for FunKit (A/B/C).
+    Works with modules.provider_switch.{get_current_provider,set_current_provider,list_labels}.
+    """
+    SLOTS = ("A", "B", "C")
+
+    def __init__(self, parent, status_cb=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.status_cb = status_cb
+        self.columnconfigure(2, weight=1)
+
+        ttk.Label(self, text="Provider:").grid(row=0, column=0, padx=(6, 4), pady=4, sticky="w")
+
+        self.var_slot = tk.StringVar()
+        self.cbo = ttk.Combobox(self, width=6, textvariable=self.var_slot,
+                                state="readonly", values=list(self.SLOTS))
+        self.cbo.grid(row=0, column=1, padx=(0, 8), pady=4, sticky="w")
+        self.cbo.bind("<<ComboboxSelected>>", self._on_slot_changed)
+
+        self.var_details = tk.StringVar(value="")
+        self.lbl = ttk.Label(self, textvariable=self.var_details)
+        self.lbl.grid(row=0, column=2, padx=(0, 8), pady=4, sticky="ew")
+
+        self._refresh_from_config()
+
+    # ---- robust helpers ----
+
+    def _labels_map(self) -> dict:
+        try:
+            labels = list_labels()
+        except Exception:
+            labels = None
+        if isinstance(labels, dict):
+            return {str(k).upper(): str(v) for k, v in labels.items()}
+        if isinstance(labels, list) and all(isinstance(x, str) for x in labels):
+            return {s: labels[i] for i, s in enumerate(self.SLOTS) if i < len(labels)}
+        if isinstance(labels, list) and all(isinstance(x, (tuple, list)) and len(x) >= 2 for x in labels):
+            out = {}
+            for key, val, *_ in labels:
+                ks = str(key).upper()
+                if ks in self.SLOTS:
+                    out[ks] = str(val)
+            return out
+        return {s: f"Slot {s}" for s in self.SLOTS}
+
+    def _normalize_current(self):
+        """
+        Normalize get_current_provider() return to (slot:str, meta:dict).
+        Accepts:
+          - ("A", {"type":...})
+          - ("A", "Local", {"type":...})
+          - {"current":"A", "A":{...}, ...}
+          - "A"
+        """
+        try:
+            res = get_current_provider()
+        except Exception:
+            return "A", {}
+        # tuple/list
+        if isinstance(res, (tuple, list)):
+            slot = None
+            meta = {}
+            for item in res:
+                if slot is None and isinstance(item, str):
+                    slot = item
+                if isinstance(item, dict):
+                    if any(k in item for k in ("type", "model", "base_url")):
+                        meta = item
+            slot = (slot or "A").upper()
+            if slot not in self.SLOTS:
+                slot = "A"
+            return slot, (meta or {})
+        # dict form
+        if isinstance(res, dict):
+            slot = str(res.get("current", "A")).upper()
+            if slot not in self.SLOTS:
+                slot = "A"
+            meta = res.get(slot, {})
+            if not isinstance(meta, dict):
+                meta = {}
+            return slot, meta
+        # string form
+        if isinstance(res, str):
+            slot = res.upper()
+            if slot not in self.SLOTS:
+                slot = "A"
+            return slot, {}
+        return "A", {}
+
+    # ---- UI updates ----
+
+    def _refresh_from_config(self):
+        cur_slot, meta = self._normalize_current()
+        self.var_slot.set(cur_slot)
+        self._update_details(cur_slot, meta)
+
+    def _update_details(self, slot: str, meta: dict | None = None):
+        labels = self._labels_map()
+        label = labels.get(slot, f"Slot {slot}")
+        meta = meta or {}
+        typ = meta.get("type", "?")
+        model = meta.get("model", "?")
+        base = meta.get("base_url", "")
+        self.var_details.set(f"{label} — {typ} — {model} — {base}")
+
+    # ---- events ----
+
+    def _on_slot_changed(self, _evt=None):
+        slot = self.var_slot.get()
+        try:
+            set_current_provider(slot)
+            cur_slot, meta = self._normalize_current()
+            self.var_slot.set(cur_slot)
+            self._update_details(cur_slot, meta)
+            if callable(self.status_cb):
+                self.status_cb(f"Provider slot set to {cur_slot}")
+        except Exception as e:
+            self.var_details.set(f"Failed to switch: {e}")
+            if callable(self.status_cb):
+                self.status_cb(f"Provider switch failed: {e}")
+
 
 # ---------------------------------------------------------------------
 # Marquee / banner (grid-friendly)
 # ---------------------------------------------------------------------
+class MarqueeStatusBar(ttk.Frame):
+    """
+    Grid‑only scrolling status bar. Call .set_text(...) for a static line,
+    or .push(msg) to append to the rotating queue. Use .start()/.stop() to control.
+    """
+    def __init__(self, parent, height=22, speed_px=2, interval_ms=40, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.canvas = tk.Canvas(self, height=height, highlightthickness=0, bd=0)
+        self.canvas.grid(row=0, column=0, sticky="ew")
+        self.columnconfigure(0, weight=1)
+
+        self._items: list[str] = []
+        self._idx = 0
+        self._text_item = None
+        self._x = 0
+        self._speed = speed_px
+        self._interval = interval_ms
+        self._running = False
+        self._cur_text = ""
+
+        self.bind("<Configure>", lambda e: self._redraw())
+
+    def _redraw(self):
+        w = self.winfo_width()
+        self.canvas.config(width=w)
+        self._draw_text(self._cur_text or " ")
+
+    def _draw_text(self, text: str):
+        self.canvas.delete("all")
+        self._cur_text = text
+        w = self.winfo_width()
+        pad = 40  # gap between repeats
+        self._text_item = self.canvas.create_text(w, 12, anchor="w", text=text)
+        bbox = self.canvas.bbox(self._text_item) or (0, 0, 0, 0)
+        text_w = bbox[2] - bbox[0]
+        self.canvas.create_text(w + text_w + pad, 12, anchor="w", text=text)
+        self._x = w
+
+    def _tick(self):
+        if not self._running:
+            return
+        for item in self.canvas.find_all():
+            self.canvas.move(item, -self._speed, 0)
+        items = self.canvas.find_all()
+        if items:
+            bbox = self.canvas.bbox(items[0])
+            if bbox and bbox[2] < 0:
+                self._advance_queue()
+        self.after(self._interval, self._tick)
+
+    def _advance_queue(self):
+        if self._items:
+            self._idx = (self._idx + 1) % len(self._items)
+            nxt = self._items[self._idx]
+        else:
+            nxt = self._cur_text
+        self._draw_text(nxt)
+
+    def set_text(self, text: str):
+        self._items = [text]
+        self._idx = 0
+        self._draw_text(text)
+
+    def push(self, text: str):
+        if not text:
+            return
+        self._items.append(text)
+        if len(self._items) == 1:
+            self.set_text(text)
+
+    def replace_queue(self, messages: list[str]):
+        self._items = [m for m in messages if m]
+        self._idx = 0
+        self._draw_text(self._items[0] if self._items else " ")
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._tick()
+
+    def stop(self):
+        self._running = False
 
 
 class DemoKitGUI(tk.Tk):
@@ -122,7 +398,11 @@ class DemoKitGUI(tk.Tk):
         self.topbar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         # Provider switch (left)
-        self.provider_switch = ProviderDropdown(self.topbar, status_cb=lambda lbl, mdl: getattr(self, 'set_ticker_text', self.status)(f"{lbl} • {mdl}"))
+        self.provider_switch = ProviderDropdown(
+            self.topbar,
+            status_cb=lambda lbl, mdl: getattr(self, 'set_ticker_text', self.status)(f"{lbl} • {mdl}"),
+            on_change=self._on_provider_changed,
+        )
         self.provider_switch.grid(row=0, column=0, sticky="w")
 
         # URL/Search entry (right side)
@@ -160,21 +440,36 @@ class DemoKitGUI(tk.Tk):
         filemenu.add_command(label="Quit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
 
-        # View menu (Tree + OPML depth)
+        # View menu (Tree + OPML depth + Tokens)
         viewmenu = tk.Menu(menubar, tearoff=0)
         viewmenu.add_command(label="Document Tree\tCtrl+T", command=self.on_tree_button)
         viewmenu.add_separator()
         viewmenu.add_command(label="Set OPML Expand Depth…", command=self._set_opml_expand_depth)
+        # --- Tokens panel entry (safe if panel missing) ---
+        if TokensPanel is not None:
+            viewmenu.add_separator()
+            viewmenu.add_command(
+                label="Tokens…\tCtrl+Shift+T",
+                command=lambda: TokensPanel(self, "storage/documents.db", "acct_demo"),
+            )
         menubar.add_cascade(label="View", menu=viewmenu)
 
         self.config(menu=menubar)
         self.bind("<Control-t>", lambda e: self.on_tree_button())
+        if TokensPanel is not None:
+            self.bind_all("<Control-Shift-T>", lambda e: TokensPanel(self, "storage/documents.db", "acct_demo"))
 
         # Install OPML plugin (menu, hotkeys, toolbar buttons)
         try:
             install_opml_extras_into_app(self)
         except Exception as e:
             print("[WARN] Failed to install OPML extras:", e)
+
+        # Attach the bottom ticker after the window is ready
+        try:
+            self.after(0, lambda: attach_ticker(self, account_uuid="acct_demo", db_path="storage/documents.db"))
+        except Exception:
+            pass
 
         self._refresh_sidebar()
         # initial status
@@ -189,6 +484,17 @@ class DemoKitGUI(tk.Tk):
             self.banner.push(str(msg))
         except Exception:
             pass
+
+    def _on_provider_changed(self, key, cfg):
+        try:
+            if hasattr(self.processor, "ai") and hasattr(self.processor.ai, "set_provider"):
+                self.processor.ai.set_provider(key, cfg.model)
+                self.status(f"Switched provider to {cfg.label} • {cfg.model}")
+            else:
+                self.status(f"Provider changed to {cfg.label}, but live AI switch is unavailable")
+        except Exception as e:
+            messagebox.showerror("Provider Switch Error", str(e))
+
 
     # ---------------- Settings ----------------
 
@@ -240,7 +546,7 @@ class DemoKitGUI(tk.Tk):
     def _refresh_sidebar(self):
         self.sidebar.delete(*self.sidebar.get_children())
         for doc in self.doc_store.get_document_index():
-            self.sidebar.insert("", "end", values=(doc["id"], doc["title"], doc["description"]))
+            self.sidebar.insert("", "end", values=(doc["id"], doc["title"], doc.get("description", "")))
 
     def _on_select(self, event):
         sel = self.sidebar.selection()
@@ -1301,7 +1607,7 @@ def sanitize_doc(doc):
 
 
 def launch_talk_tui():
-    """Launch the Piper-based terminal TUI in a child process.""" 
+    """Launch the Piper-based terminal TUI in a child process."""
     try:
         subprocess.Popen(["python3", "-m", "modules.talk_tui"], close_fds=True)
     except FileNotFoundError:

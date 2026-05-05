@@ -1,19 +1,31 @@
 {
-  "default": "baseten",
+  "default": "deepseek",
   "providers": [
+    {
+      "key": "deepseek",
+      "label": "DeepSeek V4",
+      "model": "deepseek-v4-flash",
+      "endpoint": "https://api.deepseek.com",
+      "env_key": "DEEPSEEK_API_KEY",
+      "extras": {
+        "timeout": 120
+      }
+    },
     {
       "key": "baseten",
       "label": "Baseten",
-      "model": "YOUR_BASETEN_MODEL",
-      "endpoint": "https://app.baseten.co/models",
+      "model": "openai/gpt-oss-120b",
+      "endpoint": "https://inference.baseten.co/v1",
       "env_key": "BASETEN_API_KEY",
-      "extras": {}
+      "extras": {
+        "timeout": 120
+      }
     },
     {
       "key": "local_llama",
       "label": "Local (llama.cpp)",
       "model": "mistral-7b-instruct",
-      "endpoint": "http://127.0.0.1:8081",
+      "endpoint": "http://127.0.0.1:8080",
       "env_key": null,
       "extras": {
         "timeout": 600
@@ -23,9 +35,11 @@
       "key": "openai",
       "label": "OpenAI (GPT-4o)",
       "model": "gpt-4o-mini",
-      "endpoint": null,
+      "endpoint": "https://api.openai.com/v1",
       "env_key": "OPENAI_API_KEY",
-      "extras": {}
+      "extras": {
+        "timeout": 120
+      }
     }
   ]
 }

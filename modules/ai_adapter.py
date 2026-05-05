@@ -5,6 +5,7 @@ import inspect
 from typing import Iterable, Optional, Dict, Any, Callable, List
 
 from modules.pikit_port.ai_interface import AIInterface as PiKitAI
+from modules.provider_registry import registry
 
 log = logging.getLogger(__name__)
 
@@ -12,18 +13,32 @@ PROVIDER_ALIASES = {
     "openai": "openai",
     "mistral": "mistral",
     "baseten": "baseten",
+    "deepseek": "deepseek",
     "local": "local",
+    "local_llama": "local_llama",
     "llamacpp": "llamacpp",
 }
 
-# Likely names PiKit might use for non-stream and stream entrypoints
 ASK_CANDIDATES = [
-    "ask", "complete", "completion", "chat", "generate",
-    "invoke", "run", "call", "create", "create_completion", "create_chat_completion",
+    "ask",
+    "complete",
+    "completion",
+    "chat",
+    "generate",
+    "invoke",
+    "run",
+    "call",
+    "create",
+    "create_completion",
+    "create_chat_completion",
 ]
 STREAM_CANDIDATES = [
-    "stream", "stream_complete", "streaming", "stream_chat",
-    "iter_stream", "sse_stream",
+    "stream",
+    "stream_complete",
+    "streaming",
+    "stream_chat",
+    "iter_stream",
+    "sse_stream",
 ]
 
 
@@ -35,19 +50,8 @@ def _signature_params(fn: Callable) -> List[str]:
 
 
 def _filter_kwargs_for_fn(fn: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Pass only kwargs the target function accepts."""
     params = set(_signature_params(fn))
     return {k: v for k, v in kwargs.items() if k in params}
-
-
-def _filter_kwargs_for_ctor(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Pass only kwargs supported by the class constructor."""
-    try:
-        sig = inspect.signature(cls.__init__)
-        valid = {p.name for p in sig.parameters.values() if p.name != "self"}
-        return {k: v for k, v in kwargs.items() if k in valid}
-    except Exception:
-        return {}
 
 
 def _resolve_method(obj: Any, candidates) -> Optional[Callable]:
@@ -63,7 +67,6 @@ def _mk_messages(prompt: str) -> List[Dict[str, str]]:
 
 
 def _remap_model_key(fn: Callable, model_value: Optional[str]) -> Dict[str, Any]:
-    """Some clients expect 'model', others 'model_name'."""
     if model_value is None:
         return {}
     params = set(_signature_params(fn))
@@ -74,12 +77,15 @@ def _remap_model_key(fn: Callable, model_value: Optional[str]) -> Dict[str, Any]
     return {}
 
 
-class AIInterface:
-    """
-    FunKit-facing adapter that delegates to PiKit's AI engine while preserving
-    FunKit method names/signatures. It auto-detects and adapts arguments.
-    """
+def _mask_key(key: str) -> str:
+    if not key:
+        return "(missing)"
+    if len(key) <= 10:
+        return key[:2] + "..."
+    return key[:6] + "..." + key[-4:]
 
+
+class AIInterface:
     def __init__(
         self,
         provider: Optional[str] = None,
@@ -87,40 +93,45 @@ class AIInterface:
         extra_headers: Optional[Dict[str, str]] = None,
         timeout_s: int = 120,
     ):
-        prov = provider or os.getenv("FUNKIT_AI_PROVIDER") or "openai"
-        prov = PROVIDER_ALIASES.get(prov.lower(), prov.lower())
-
-        self._provider = prov
-        self._default_model = default_model
+        selected_key = (
+            provider or os.getenv("FUNKIT_AI_PROVIDER") or registry.read_selected()
+        )
         self._extra_headers = extra_headers or {}
         self._timeout_s = timeout_s
+        self._client = None
+        self._ask_fn = None
+        self._stream_fn = None
+        self._provider = ""
+        self._default_model = None
+        self._cfg = None
 
-        ctor_kwargs = {
-            "provider": prov,
-            "default_model": default_model,
-            "timeout": timeout_s,
-            "extra_headers": self._extra_headers,
-        }
-        filtered = _filter_kwargs_for_ctor(PiKitAI, ctor_kwargs)
+        self.set_provider(selected_key, default_model)
 
-        try:
-            self._client = PiKitAI(**filtered)
-        except TypeError:
-            self._client = PiKitAI()
+    def _build_client(self, cfg, model_to_use: str):
+        key_val = os.getenv(cfg.env_key, "") if cfg.env_key else ""
+        base_url = cfg.endpoint
+        timeout = (
+            cfg.extras.get("timeout", self._timeout_s)
+            if isinstance(cfg.extras, dict)
+            else self._timeout_s
+        )
 
-        # Resolve callable entrypoints once
+        print(
+            f"[AI DEBUG] build_client: provider={cfg.key} "
+            f"endpoint={base_url} model={model_to_use} "
+            f"env_key={cfg.env_key} key_present={bool(key_val)}"
+        )
+
+        self._client = PiKitAI(
+            api_key=key_val or None,
+            base_url=base_url,
+            model=model_to_use,
+            timeout=timeout,
+        )
         self._ask_fn = _resolve_method(self._client, ASK_CANDIDATES)
         self._stream_fn = _resolve_method(self._client, STREAM_CANDIDATES)
 
-        log.info("AIAdapter initialized (provider=%s, model=%s)", prov, default_model)
-
-    # --- FunKit API ---
-
     def ask(self, prompt: str, model: Optional[str] = None, **kwargs) -> str:
-        """
-        Accepts FunKit's prompt+model and adapts to PiKit's API.
-        If the target fn expects `messages`, we build them.
-        """
         if not self._ask_fn:
             exported = [n for n in dir(self._client) if not n.startswith("_")]
             raise AttributeError(
@@ -128,13 +139,20 @@ class AIInterface:
                 f"Exports: {exported}"
             )
 
+        effective_model = model or self._default_model
+        cfg = self._cfg
+        key_val = os.getenv(cfg.env_key, "") if (cfg and cfg.env_key) else ""
+
+        print(
+            f"[AI DEBUG] ask: provider={self._provider} "
+            f"endpoint={cfg.endpoint if cfg else None} model={effective_model} "
+            f"env_key={cfg.env_key if cfg else None} key_present={bool(key_val)}" 
+        )
+
         fn = self._ask_fn
         params = set(_signature_params(fn))
-
-        # Build call kwargs
         call_kwargs: Dict[str, Any] = {}
-        # Model key remap
-        call_kwargs.update(_remap_model_key(fn, model or self._default_model))
+        call_kwargs.update(_remap_model_key(fn, effective_model))
 
         if "messages" in params:
             call_kwargs["messages"] = _mk_messages(prompt)
@@ -143,18 +161,18 @@ class AIInterface:
         elif "input" in params:
             call_kwargs["input"] = prompt
         else:
-            # As a last resort, still try 'messages'
             call_kwargs["messages"] = _mk_messages(prompt)
 
-        # Carry over any extra kwargs the target supports (temperature, max_tokens, etc.)
-        call_kwargs.update(_filter_kwargs_for_fn(fn, kwargs))
+        overrides = kwargs.pop("overrides", None)
+        if isinstance(overrides, dict):
+            kwargs.update(overrides)
 
+        call_kwargs.update(_filter_kwargs_for_fn(fn, kwargs))
         return fn(**call_kwargs)
 
-    def stream(self, prompt: str, model: Optional[str] = None, **kwargs) -> Iterable[str]:
-        """
-        Prefer a true streaming API. If not available, yield once from ask().
-        """
+    def stream(
+        self, prompt: str, model: Optional[str] = None, **kwargs
+    ) -> Iterable[str]:
         if callable(self._stream_fn):
             fn = self._stream_fn
             params = set(_signature_params(fn))
@@ -170,13 +188,16 @@ class AIInterface:
             else:
                 call_kwargs["messages"] = _mk_messages(prompt)
 
+            overrides = kwargs.pop("overrides", None)
+            if isinstance(overrides, dict):
+                kwargs.update(overrides)
+
             call_kwargs.update(_filter_kwargs_for_fn(fn, kwargs))
             yield from fn(**call_kwargs)
             return
 
-        # Fallback: single non-streaming call
         yield self.ask(prompt=prompt, model=model, **kwargs)
-        # --- Compat aliases used by older FunKit code paths ---
+
     def query(self, *args, **kwargs):
         return self.ask(*args, **kwargs)
 
@@ -190,77 +211,36 @@ class AIInterface:
         return self.ask(*args, **kwargs)
 
     def chat(self, messages=None, prompt=None, model=None, **kwargs):
-        # If a caller passes messages, try to use the underlying chat/complete;
-        # otherwise just treat as a normal ask().
-        if messages is not None:
-            fn = getattr(self, "_ask_fn", None)
-            if callable(fn):
-                # Prefer message-shaped calls; our ask already adapts keys too.
-                try:
-                    return self.ask(prompt=prompt or "", model=model, messages=messages, **kwargs)
-                except TypeError:
-                    pass
-        # Fallback: reduce to a single prompt
         if prompt is None and messages:
             try:
-                prompt = next((m.get("content","") for m in reversed(messages) if m.get("role")=="user"), "")
+                prompt = next(
+                    (
+                        m.get("content", "")
+                        for m in reversed(messages)
+                        if m.get("role") == "user"
+                    ),
+                    "",
+                )
             except Exception:
                 prompt = ""
         return self.ask(prompt or "", model=model, **kwargs)
 
     def set_provider(self, provider: str, default_model: Optional[str] = None) -> None:
-        prov = PROVIDER_ALIASES.get(provider.lower(), provider.lower())
-        setter = getattr(self._client, "set_provider", None)
+        cfg = registry.get(provider)
+        prov = PROVIDER_ALIASES.get(cfg.key.lower(), cfg.key.lower())
+        model_to_use = default_model or cfg.model
 
-        if callable(setter):
-            try:
-                # Try (provider, model) if supported
-                sig = inspect.signature(setter)
-                if len(sig.parameters) >= 2:
-                    setter(prov, default_model or self._default_model)
-                else:
-                    setter(prov)
-            except Exception:
-                setter(prov)
-        else:
-            # Rebuild the client if live switching isn't supported
-            ctor_kwargs = {
-                "provider": prov,
-                "default_model": default_model or self._default_model,
-                "timeout": self._timeout_s,
-                "extra_headers": self._extra_headers,
-            }
-            filtered = _filter_kwargs_for_ctor(PiKitAI, ctor_kwargs)
-            try:
-                self._client = PiKitAI(**filtered)
-            except TypeError:
-                self._client = PiKitAI()
-            # Re-resolve methods after rebuilding
-            self._ask_fn = _resolve_method(self._client, ASK_CANDIDATES)
-            self._stream_fn = _resolve_method(self._client, STREAM_CANDIDATES)
-
+        self._cfg = cfg
         self._provider = prov
-        if default_model:
-            self._default_model = default_model
+        self._default_model = model_to_use
+
+        self._build_client(cfg, model_to_use)
+
+        print(
+            f"[AI DEBUG] set_provider: provider={cfg.key} "
+            f"endpoint={cfg.endpoint} model={model_to_use} "
+            f"env_key={cfg.env_key} key_present={bool(os.getenv(cfg.env_key, '') if cfg.env_key else '')}"
+        )
 
     def get_provider(self) -> str:
         return self._provider
-
-    def models(self):
-        fn = getattr(self._client, "models", None)
-        if callable(fn):
-            try:
-                return list(fn())
-            except Exception:
-                return []
-        return []
-
-    def healthcheck(self) -> Dict[str, Any]:
-        fn = getattr(self._client, "healthcheck", None)
-        if callable(fn):
-            try:
-                return fn()
-            except Exception as e:
-                return {"ok": False, "error": str(e), "provider": self._provider}
-        return {"ok": True, "provider": self._provider}
-

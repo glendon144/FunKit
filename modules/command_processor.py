@@ -16,8 +16,8 @@ from modules.text_sanitizer import sanitize_ai_reply
 
 # ------------ Config (env-tunable) ------------
 SHORT_THRESHOLD_TOKENS = int(os.getenv("PIKIT_SHORT_THRESHOLD_TOKENS", "200"))
-SHORT_MAX_TOKENS       = int(os.getenv("PIKIT_SHORT_MAX_TOKENS", "220"))   # quick replies
-LONG_MAX_TOKENS        = int(os.getenv("PIKIT_LONG_MAX_TOKENS", "900"))    # detailed replies
+SHORT_MAX_TOKENS = int(os.getenv("PIKIT_SHORT_MAX_TOKENS", "220"))  # quick replies
+LONG_MAX_TOKENS = int(os.getenv("PIKIT_LONG_MAX_TOKENS", "900"))  # detailed replies
 # If you simply want to "double tokens", bump LONG_MAX_TOKENS and/or SHORT_MAX_TOKENS above.
 # Timeout was already made env-configurable in ai_interface/local_ai_interface earlier.
 
@@ -28,6 +28,7 @@ except Exception:  # pragma: no cover
     try:
         from modules.hypertext_parser import render_binary_as_text  # type: ignore
     except Exception:  # pragma: no cover
+
         def render_binary_as_text(data_or_path: Any, title: str = "Document") -> str:
             try:
                 if isinstance(data_or_path, (bytes, bytearray)):
@@ -82,7 +83,9 @@ def _normalize_row(row: Any) -> Tuple[Any, str, Any]:
 
 
 class CommandProcessor:
-    def __init__(self, store: DocumentStore, ai_interface, logger: Logger | None = None):
+    def __init__(
+        self, store: DocumentStore, ai_interface, logger: Logger | None = None
+    ):
         self.doc_store = store
         self.ai = ai_interface
         self.logger = logger if logger else Logger()
@@ -93,7 +96,9 @@ class CommandProcessor:
         """Return the SQLite connection from the document store, if available."""
         return getattr(self.doc_store, "conn", None)
 
-    def _build_memory_preamble(self, mem: dict, current_doc_id: int | None = None) -> str:
+    def _build_memory_preamble(
+        self, mem: dict, current_doc_id: int | None = None
+    ) -> str:
         """Construct a small instruction block from memory to steer the model."""
         if not isinstance(mem, dict):
             return ""
@@ -161,6 +166,7 @@ class CommandProcessor:
         except Exception:
             return {}
 
+
     def ask_question(self, prompt: str) -> str | None:
         """Send a standalone prompt to AI, applying memory preamble, adaptive length, and truncation."""
         try:
@@ -173,13 +179,24 @@ class CommandProcessor:
             full_prompt_core = (preamble + "\n\n" + prompt) if preamble else prompt
             full_prompt = f"{full_prompt_core}\n\n{steer}"
 
-            self.logger.info(f"Sending standalone prompt to AI (max_tokens={max_toks}): {full_prompt}")
+            self.logger.info(
+                f"Sending standalone prompt to AI (max_tokens={max_toks}): {full_prompt}"
+            )
             kwargs = self._apply_overrides(full_prompt, max_toks)
+
+            print(
+                f"[CP DEBUG] ask_question entering self.ai.query with prompt={full_prompt[:80]!r} kwargs={kwargs!r}"
+            )
+
             try:
                 response = self.ai.query(full_prompt, **kwargs)
             except TypeError:
                 # Fallback if interface doesn't accept overrides kwarg
                 response = self.ai.query(full_prompt)
+
+            print(
+                f"[CP DEBUG] ask_question got response type={type(response).__name__} value={repr(response)[:200]}"
+            )
 
             response = sanitize_ai_reply(response)
             self.logger.info("AI response received successfully")
@@ -188,7 +205,6 @@ class CommandProcessor:
         except Exception as e:
             self.logger.error(f"AI query failed: {e}")
             return None
-
     def query_ai(
         self,
         selected_text: str,
@@ -205,7 +221,11 @@ class CommandProcessor:
         adaptive length, and truncates likely-incomplete sentences.
         """
         # Compose the base prompt
-        base_prompt = f"{prefix} {selected_text}" if prefix else f"Please expand on this: {selected_text}"
+        base_prompt = (
+            f"{prefix} {selected_text}"
+            if prefix
+            else f"Please expand on this: {selected_text}"
+        )
 
         # Memory preamble
         conn = self._get_conn()
@@ -278,11 +298,15 @@ class CommandProcessor:
                             # Some stores expose a generic update_document(id, body)
                             self.doc_store.update_document(current_doc_id, updated)  # type: ignore
                     except Exception as e:
-                        self.logger.error(f"Failed updating original doc {current_doc_id}: {e}")
+                        self.logger.error(
+                            f"Failed updating original doc {current_doc_id}: {e}"
+                        )
             else:
                 # Skip binary or missing bodies
                 if isinstance(body, (bytes, bytearray)):
-                    self.logger.info("Original doc is binary; skipping in-place link embed.")
+                    self.logger.info(
+                        "Original doc is binary; skipping in-place link embed."
+                    )
         else:
             self.logger.error(f"Original document {current_doc_id} not found")
 
@@ -382,8 +406,12 @@ class CommandProcessor:
         os.makedirs(base_tmp, exist_ok=True)
 
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", prefix="opml_", suffix=".opml",
-            dir=base_tmp, delete=False,
+            mode="w",
+            encoding="utf-8",
+            prefix="opml_",
+            suffix=".opml",
+            dir=base_tmp,
+            delete=False,
         ) as tf:
             tf.write(xml_text)
             tmp_path = tf.name
@@ -400,7 +428,10 @@ class CommandProcessor:
         """Fetch an OPML from URL and import it."""
         try:
             import requests
-            r = requests.get(url, timeout=timeout, headers={"User-Agent": "FunKit/OPML-Importer"})
+
+            r = requests.get(
+                url, timeout=timeout, headers={"User-Agent": "FunKit/OPML-Importer"}
+            )
             r.raise_for_status()
             xml_text = r.text
         except Exception as e:
