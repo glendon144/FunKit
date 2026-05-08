@@ -49,6 +49,7 @@ except Exception:
 
 
 SETTINGS_FILE = Path("funkit_settings.json")
+DEFAULT_DREAMS_DB_PATH = Path("storage") / "funkit_dreams.sqlite3"
 
 
 # ---- network helper (thread-safe: no Tk/SQLite here) ----
@@ -277,7 +278,7 @@ class ProviderSwitcher_DEPRECATED(ttk.Frame):
 # ---------------------------------------------------------------------
 class MarqueeStatusBar(ttk.Frame):
     """
-    Grid‑only scrolling status bar. Call .set_text(...) for a static line,
+    Grid-only scrolling status bar. Call .set_text(...) for a static line,
     or .push(msg) to append to the rotating queue. Use .start()/.stop() to control.
     """
     def __init__(self, parent, height=22, speed_px=2, interval_ms=40, **kwargs):
@@ -405,14 +406,24 @@ class DemoKitGUI(tk.Tk):
         )
         self.provider_switch.grid(row=0, column=0, sticky="w")
 
+        # RAG toggle
+        self.rag_var = tk.BooleanVar(value=self._initial_rag_state())
+        self.rag_check = ttk.Checkbutton(
+            self.topbar,
+            text="RAG",
+            variable=self.rag_var,
+            command=self._on_rag_toggled,
+        )
+        self.rag_check.grid(row=0, column=1, sticky="w", padx=(8, 8))
+
         # URL/Search entry (right side)
-        self.topbar.grid_columnconfigure(1, weight=1)
+        self.topbar.grid_columnconfigure(2, weight=1)
         self.url_var = tk.StringVar()
         self.url_entry = ttk.Entry(self.topbar, textvariable=self.url_var)
-        self.url_entry.grid(row=0, column=1, sticky="ew", padx=(8, 4))
+        self.url_entry.grid(row=0, column=2, sticky="ew", padx=(8, 4))
         self.url_entry.bind("<Return>", self._on_url_entered)
         self.go_btn = ttk.Button(self.topbar, text="Go", command=self._on_url_entered)
-        self.go_btn.grid(row=0, column=2, sticky="e", padx=(4, 6))
+        self.go_btn.grid(row=0, column=3, sticky="e", padx=(4, 6))
 
         # image state
         self._last_pil_img: Image.Image | None = None
@@ -422,6 +433,13 @@ class DemoKitGUI(tk.Tk):
         # ---- Settings ----
         self.settings = self._load_settings()
         self.opml_expand_depth: int = int(self.settings.get("opml_expand_depth", 2))
+        self.archive_memory_enabled: bool = bool(self.settings.get("archive_memory_enabled", True))
+        self.archive_publish_to_dream: bool = bool(self.settings.get("archive_publish_to_dream", False))
+        self.archive_publish_to_openbrain: bool = bool(self.settings.get("archive_publish_to_openbrain", False))
+        self.archive_memory_ttl_seconds: int | None = self.settings.get("archive_memory_ttl_seconds")
+        self.archive_publish_to_dream_var = tk.BooleanVar(value=self.archive_publish_to_dream)
+        self.archive_publish_to_openbrain_var = tk.BooleanVar(value=self.archive_publish_to_openbrain)
+        self._memory_publish_adapter = None
 
         # Build UI
         self._build_sidebar()
@@ -445,6 +463,22 @@ class DemoKitGUI(tk.Tk):
         viewmenu.add_command(label="Document Tree\tCtrl+T", command=self.on_tree_button)
         viewmenu.add_separator()
         viewmenu.add_command(label="Set OPML Expand Depth…", command=self._set_opml_expand_depth)
+        viewmenu.add_separator()
+        viewmenu.add_checkbutton(
+            label="RAG Enabled",
+            variable=self.rag_var,
+            command=self._on_rag_toggled,
+        )
+        viewmenu.add_checkbutton(
+            label="Archive Publish to Dream",
+            variable=self.archive_publish_to_dream_var,
+            command=self._on_archive_publish_to_dream_toggled,
+        )
+        viewmenu.add_checkbutton(
+            label="Archive Publish to OpenBrain",
+            variable=self.archive_publish_to_openbrain_var,
+            command=self._on_archive_publish_to_openbrain_toggled,
+        )
         # --- Tokens panel entry (safe if panel missing) ---
         if TokensPanel is not None:
             viewmenu.add_separator()
@@ -478,6 +512,8 @@ class DemoKitGUI(tk.Tk):
         except Exception:
             pass
 
+        self.after(0, self._sync_rag_ui)
+
     # ---------------- Status -> banner ----------------
     def status(self, msg: str):
         try:
@@ -495,6 +531,47 @@ class DemoKitGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Provider Switch Error", str(e))
 
+    # ---------------- RAG controls ----------------
+
+    def _initial_rag_state(self) -> bool:
+        try:
+            if hasattr(self.processor, "is_rag_enabled"):
+                return bool(self.processor.is_rag_enabled())
+            return bool(getattr(self.processor, "rag_enabled", False))
+        except Exception:
+            return False
+
+    def _sync_rag_ui(self):
+        try:
+            self.rag_var.set(self._initial_rag_state())
+        except Exception:
+            pass
+
+    def _on_rag_toggled(self):
+        enabled = bool(self.rag_var.get())
+        try:
+            if hasattr(self.processor, "set_rag_enabled"):
+                self.processor.set_rag_enabled(enabled)
+            else:
+                setattr(self.processor, "rag_enabled", enabled)
+            self.status(f"RAG {'enabled' if enabled else 'disabled'}")
+        except Exception as e:
+            messagebox.showerror("RAG Toggle Error", str(e))
+            self._sync_rag_ui()
+
+    def _on_archive_publish_to_dream_toggled(self):
+        enabled = bool(self.archive_publish_to_dream_var.get())
+        self.archive_publish_to_dream = enabled
+        self.settings["archive_publish_to_dream"] = enabled
+        self._save_settings()
+        self.status(f"Archive publish to Dream {'enabled' if enabled else 'disabled'}")
+
+    def _on_archive_publish_to_openbrain_toggled(self):
+        enabled = bool(self.archive_publish_to_openbrain_var.get())
+        self.archive_publish_to_openbrain = enabled
+        self.settings["archive_publish_to_openbrain"] = enabled
+        self._save_settings()
+        self.status(f"Archive publish to OpenBrain {'enabled' if enabled else 'disabled'}")
 
     # ---------------- Settings ----------------
 
@@ -511,6 +588,119 @@ class DemoKitGUI(tk.Tk):
             SETTINGS_FILE.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
         except Exception as e:
             print("[WARN] Could not save settings:", e)
+
+    def _get_memory_publish_adapter(self):
+        if self._memory_publish_adapter is not None:
+            return self._memory_publish_adapter
+
+        if not self.archive_memory_enabled:
+            return None
+
+        try:
+            from memory_publish_adapter import (
+                DreamServerPublisher,
+                FunKitDreamAdapter,
+                OpenBrainPublisher,
+            )
+        except Exception as exc:
+            self.status(f"Archive memory adapter unavailable: {exc}")
+            return None
+
+        try:
+            dream_module = __import__("dream", fromlist=["DreamProcessor"])
+            DreamProcessor = getattr(dream_module, "DreamProcessor")
+        except Exception:
+            try:
+                dream_module = __import__("PiKit.modules.dream", fromlist=["DreamProcessor"])
+                DreamProcessor = getattr(dream_module, "DreamProcessor")
+            except Exception as exc:
+                self.status(f"DreamProcessor unavailable: {exc}")
+                return None
+
+        dreams_db_path = str(Path(self.settings.get("dreams_db_path", DEFAULT_DREAMS_DB_PATH)))
+
+        try:
+            dream_processor = DreamProcessor(dreams_db_path=dreams_db_path)
+        except Exception as exc:
+            self.status(f"Could not initialize DreamProcessor: {exc}")
+            return None
+
+        dream_publisher = None
+        dream_base_url = self.settings.get("dream_base_url") or os.environ.get("DREAM_BASE_URL")
+        if dream_base_url:
+            try:
+                from dream_client import DreamClient
+
+                dream_publisher = DreamServerPublisher(DreamClient(base_url=dream_base_url))
+            except Exception as exc:
+                self.status(f"Dream publish disabled: {exc}")
+
+        openbrain_publisher = None
+        openbrain_base_url = self.settings.get("openbrain_base_url") or os.environ.get("OPENBRAIN_BASE_URL")
+        openbrain_access_token = self.settings.get("openbrain_access_token") or os.environ.get("OPENBRAIN_ACCESS_TOKEN")
+        if openbrain_base_url and openbrain_access_token:
+            try:
+                from openbrain_client import OpenBrainClient
+
+                openbrain_publisher = OpenBrainPublisher(
+                    OpenBrainClient(
+                        base_url=openbrain_base_url,
+                        access_token=openbrain_access_token,
+                    )
+                )
+            except Exception as exc:
+                self.status(f"OpenBrain publish disabled: {exc}")
+
+        self._memory_publish_adapter = FunKitDreamAdapter(
+            processor=dream_processor,
+            dream_publisher=dream_publisher,
+            openbrain_publisher=openbrain_publisher,
+        )
+        return self._memory_publish_adapter
+
+    def _archive_memory_after_export(self, *, title: str, body, export_path: str) -> None:
+        adapter = self._get_memory_publish_adapter()
+        if adapter is None:
+            return
+
+        if isinstance(body, (bytes, bytearray)):
+            content = render_binary_as_text(body, title or "Document")
+        else:
+            content = body or ""
+
+        snippet = str(content).strip()
+        if len(snippet) > 4000:
+            snippet = snippet[:4000]
+
+        metadata = {
+            "ui_action": "archive_export",
+            "doc_title": title,
+            "doc_id": self.current_doc_id,
+            "export_path": export_path,
+        }
+
+        try:
+            adapter.note_archive_event(
+                snippet or f"Exported document: {title}",
+                source_doc_id=self.current_doc_id,
+                metadata=metadata,
+            )
+            adapter.publish_latest(
+                title=f"FunKit archive export: {title}",
+                publish_to_dream=self.archive_publish_to_dream,
+                publish_to_openbrain=self.archive_publish_to_openbrain,
+                ttl_seconds=self.archive_memory_ttl_seconds,
+            )
+        except Exception as exc:
+            self.status(f"Archive memory publish failed: {exc}")
+            return
+
+        destinations = ["local dream memory"]
+        if self.archive_publish_to_dream:
+            destinations.append("Dream")
+        if self.archive_publish_to_openbrain:
+            destinations.append("OpenBrain")
+        self.status(f"Archive noted to {', '.join(destinations)}")
 
     def _set_opml_expand_depth(self):
         val = simpledialog.askinteger(
@@ -1331,6 +1521,7 @@ class DemoKitGUI(tk.Tk):
                     Path(path).write_text(text_out, encoding="utf-8", newline="\n")
                 else:
                     Path(path).write_text(body or "", encoding="utf-8", newline="\n")
+            self._archive_memory_after_export(title=title, body=body, export_path=path)
             messagebox.showinfo("Export", f"Saved:\n{path}")
         except Exception as e:
             messagebox.showerror("Export", f"Could not save:\n{e}")
